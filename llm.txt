@@ -1,0 +1,10 @@
+# Deltatronix agent — local LLM backend (OpenAI-compatible API).
+# Uncomment exactly ONE url line, then restart: dtx-agent run
+# The first uncommented line wins. Keep this file next to the dtx-agent binary.
+
+# Ollama (default) — https://ollama.com  serves the API at :11434/v1
+http://localhost:11434/v1
+
+# LM Studio — start the server in LM Studio's Developer tab, then swap the
+# leading '#' so this line is active and the Ollama line above is commented.
+# http://localhost:1234/v1

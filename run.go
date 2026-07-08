@@ -28,6 +28,8 @@ func cmdRun() error {
 	if err != nil {
 		return fmt.Errorf("not paired (run `dtx-agent pair <code>` first): %w", err)
 	}
+	llmBase = loadLLMBase()
+	log.Printf("LLM backend: %s", llmBase)
 	url := wsURL(cfg.APIURL)
 	log.Printf("dtx-agent starting; connecting to %s as agent %s", url, cfg.AgentID)
 
@@ -161,12 +163,12 @@ func (a *agent) probeAndAdvertise() {
 	models := a.visionModels
 	a.mu.Unlock()
 
-	installed, probeErr := probeOllama(a.ctx)
+	installed, probeErr := probeModels(a.ctx)
 	has := probeErr == nil && hasVisionModel(installed, models)
 
 	a.mu.Lock()
 	if probeErr != nil && !a.hintShown {
-		printInstallHint(models)
+		printLLMHint(models)
 		a.hintShown = true
 	}
 	if probeErr == nil {
@@ -227,7 +229,7 @@ func (a *agent) runJob(jobID string, p *VisionPayload) {
 		a.mu.Lock()
 		acceptable := a.visionModels
 		a.mu.Unlock()
-		if installed, probeErr := probeOllama(jctx); probeErr == nil {
+		if installed, probeErr := probeModels(jctx); probeErr == nil {
 			if picked := pickModel(p.Model, installed, acceptable); picked != p.Model {
 				log.Printf("job %s: model %q not installed, running %q", jobID, p.Model, picked)
 				p.Model = picked
@@ -256,9 +258,11 @@ func doVision(ctx context.Context, p *VisionPayload) (json.RawMessage, error) {
 		if err != nil {
 			return nil, fmt.Errorf("download %s: %w", f.URL, err)
 		}
-		images = append(images, base64.StdEncoding.EncodeToString(b))
+		img := toOllamaImage(b)
+		uri := "data:" + http.DetectContentType(img) + ";base64," + base64.StdEncoding.EncodeToString(img)
+		images = append(images, uri)
 	}
-	return ollamaChat(ctx, p.Model, p.Prompt, images, p.ResponseSchema)
+	return chat(ctx, p.Model, p.Prompt, images, p.ResponseSchema)
 }
 
 func download(ctx context.Context, url string) ([]byte, error) {

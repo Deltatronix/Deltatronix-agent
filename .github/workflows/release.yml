@@ -37,6 +37,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4 # for llm.txt, shipped alongside the binaries
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -44,4 +45,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*
+            llm.txt
