@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -118,30 +117,44 @@ func TestChatSendsOpenAIRequest(t *testing.T) {
 	}
 }
 
-func TestParseLLMBase(t *testing.T) {
-	// Ollama commented, LM Studio active → LM Studio wins.
-	if got := parseLLMBase([]byte("# note\n# http://localhost:11434/v1\nhttp://localhost:1234/v1\n")); got != "http://localhost:1234/v1" {
-		t.Errorf("parseLLMBase = %q, want LM Studio url", got)
+func TestParseLLMSettings(t *testing.T) {
+	// Ollama commented, LM Studio active → LM Studio wins; logging on by default.
+	s := parseLLMSettings([]byte("# note\n# http://localhost:11434/v1\nhttp://localhost:1234/v1\n"))
+	if s.BackendURL != "http://localhost:1234/v1" {
+		t.Errorf("BackendURL = %q, want LM Studio url", s.BackendURL)
 	}
-	// First uncommented line wins; surrounding whitespace trimmed.
-	if got := parseLLMBase([]byte("\n#comment\n  http://a/v1  \nhttp://b/v1\n")); got != "http://a/v1" {
-		t.Errorf("parseLLMBase = %q, want http://a/v1", got)
+	if !s.LogEnabled {
+		t.Errorf("LogEnabled = false, want true by default")
 	}
-	// All commented → empty (caller falls back to default).
-	if got := parseLLMBase([]byte("# only\n# comments\n")); got != "" {
-		t.Errorf("parseLLMBase = %q, want empty", got)
+
+	// First bare line wins, whitespace trimmed; key=value lines set logging and
+	// are not mistaken for the URL; unknown keys ignored.
+	s = parseLLMSettings([]byte("\n#comment\nlog=off\n  http://a/v1  \nlog_file=/var/log/dtx.log\nhttp://b/v1\nfoo=bar\n"))
+	if s.BackendURL != "http://a/v1" {
+		t.Errorf("BackendURL = %q, want http://a/v1", s.BackendURL)
+	}
+	if s.LogEnabled {
+		t.Errorf("LogEnabled = true, want false (log=off)")
+	}
+	if s.LogFile != "/var/log/dtx.log" {
+		t.Errorf("LogFile = %q, want /var/log/dtx.log", s.LogFile)
+	}
+
+	// All commented → no URL (caller falls back to default).
+	if s := parseLLMSettings([]byte("# only\n# comments\n")); s.BackendURL != "" {
+		t.Errorf("BackendURL = %q, want empty", s.BackendURL)
 	}
 }
 
-func TestLoadLLMBaseCreatesAndReads(t *testing.T) {
+func TestLoadLLMSettingsCreatesAndReads(t *testing.T) {
 	// Redirect the config dir so we don't touch the real one (both vars cover
 	// darwin, which uses HOME, and linux, which uses XDG_CONFIG_HOME).
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// First run: file missing → writes default, returns the Ollama default.
-	if got := loadLLMBase(); got != "http://localhost:11434/v1" {
-		t.Fatalf("first loadLLMBase = %q, want Ollama default", got)
+	if got := loadLLMSettings(); got.BackendURL != "http://localhost:11434/v1" {
+		t.Fatalf("first loadLLMSettings = %q, want Ollama default", got.BackendURL)
 	}
 	path, err := llmConfigPath()
 	if err != nil {
@@ -151,37 +164,12 @@ func TestLoadLLMBaseCreatesAndReads(t *testing.T) {
 		t.Fatalf("llm.txt was not created: %v", err)
 	}
 
-	// User switches to LM Studio → next load returns it.
+	// User switches to LM Studio → next load returns it (per-user file is authoritative).
 	if err := os.WriteFile(path, []byte("# http://localhost:11434/v1\nhttp://localhost:1234/v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadLLMBase(); got != "http://localhost:1234/v1" {
-		t.Fatalf("after edit loadLLMBase = %q, want LM Studio url", got)
-	}
-}
-
-func TestLoadLLMBasePrefersFileNextToBinary(t *testing.T) {
-	// The release ships llm.txt next to the binary; that copy must win over the
-	// per-user config dir. Drop one beside the test executable and check it wins.
-	exe, err := os.Executable()
-	if err != nil {
-		t.Skip("cannot locate test executable")
-	}
-	p := filepath.Join(filepath.Dir(exe), "llm.txt")
-	if _, err := os.Stat(p); err == nil {
-		t.Skip("llm.txt already exists next to test binary")
-	}
-	if err := os.WriteFile(p, []byte("# http://localhost:11434/v1\nhttp://localhost:1234/v1\n"), 0o644); err != nil {
-		t.Skipf("cannot write next to test binary: %v", err)
-	}
-	defer os.Remove(p)
-
-	// Point the config dir elsewhere so only the sibling file can satisfy this.
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if got := loadLLMBase(); got != "http://localhost:1234/v1" {
-		t.Fatalf("loadLLMBase = %q, want the sibling llm.txt url", got)
+	if got := loadLLMSettings(); got.BackendURL != "http://localhost:1234/v1" {
+		t.Fatalf("after edit loadLLMSettings = %q, want LM Studio url", got.BackendURL)
 	}
 }
 

@@ -8,3 +8,9 @@ http://localhost:11434/v1
 # LM Studio — start the server in LM Studio's Developer tab, then swap the
 # leading '#' so this line is active and the Ollama line above is commented.
 # http://localhost:1234/v1
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+# Logs are written to a file so the tray build (which has no console) can show
+# them via the "Open Logs" / "Open Console" menu items. Uncomment to change.
+# log=on                 # on (default) | off
+# log_file=/full/path/to/dtx-agent.log   # default: <config dir>/dtx-agent.log

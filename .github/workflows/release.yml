@@ -7,13 +7,32 @@ on:
 permissions:
   contents: write
 
+# The tray needs CGo (Cocoa / GTK+AppIndicator), so builds run on native per-OS
+# runners instead of one cross-compiling Linux job.
 jobs:
-  build:
+  build-linux:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [windows, darwin, linux]
-        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Install tray deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        # linux-arm64 dropped for now: CGo tray needs an arm runner or GTK cross-libs.
+        run: go build -trimpath -ldflags "-s -w" -o "dist/dtx-agent-linux-amd64" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dtx-agent-linux-amd64
+          path: dist/*
+
+  build-windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -21,20 +40,39 @@ jobs:
           go-version: "1.26"
       - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          out="dtx-agent-${GOOS}-${GOARCH}"
-          [ "$GOOS" = "windows" ] && out="${out}.exe"
-          go build -trimpath -ldflags "-s -w" -o "dist/${out}" .
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        # -H=windowsgui: no console window for the tray app.
+        run: go build -trimpath -ldflags "-H=windowsgui -s -w" -o "dist/dtx-agent-windows-amd64.exe" .
       - uses: actions/upload-artifact@v4
         with:
-          name: dtx-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: dtx-agent-windows-amd64
+          path: dist/*
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        goarch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: go build -trimpath -ldflags "-s -w" -o "dist/dtx-agent-darwin-${{ matrix.goarch }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dtx-agent-darwin-${{ matrix.goarch }}
           path: dist/*
 
   release:
-    needs: build
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4 # for llm.txt, shipped alongside the binaries

@@ -206,9 +206,9 @@ func printLLMHint(acceptable []string) {
 	fmt.Println("  Waiting for a server — this agent will keep retrying.")
 }
 
-// defaultLLMTxt is the template shipped in the release (llm.txt, next to the
-// binary) and written to the per-user config dir on first run. Embedding the
-// same file keeps the shipped copy and the built-in default from drifting.
+// defaultLLMTxt is the template shipped in the release (llm.txt) and written to
+// the per-user config dir on first run. Embedding the same file keeps the
+// shipped reference copy and the built-in default from drifting.
 //
 //go:embed llm.txt
 var defaultLLMTxt string
@@ -221,42 +221,51 @@ func llmConfigPath() (string, error) {
 	return filepath.Join(dir, "dtx-agent", "llm.txt"), nil
 }
 
-// parseLLMBase returns the first non-comment, non-blank line (trimmed), or "".
-// ponytail: whole-line comments only, first url wins — no inline-comment / key=value parsing.
-func parseLLMBase(data []byte) string {
+// LLMSettings is the parsed content of llm.txt: the backend URL plus logging knobs.
+type LLMSettings struct {
+	BackendURL string
+	LogEnabled bool
+	LogFile    string // "" → caller's default (<config dir>/dtx-agent.log)
+}
+
+// parseLLMSettings reads llm.txt. The first bare line (not a comment, not
+// key=value) is the backend URL — the original "first url wins" rule. Recognized
+// key=value lines set logging options; unknown keys are ignored.
+// ponytail: whole-line comments only; two known keys (log, log_file), no levels/rotation.
+func parseLLMSettings(data []byte) LLMSettings {
+	s := LLMSettings{LogEnabled: true} // logging on by default
 	for _, line := range strings.Split(string(data), "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		return t
-	}
-	return ""
-}
-
-// loadLLMBase resolves the backend URL. It first honors an llm.txt shipped next
-// to the binary (so the user can edit it before the first run), then falls back
-// to a per-user copy in the config dir, writing the default there on first run.
-func loadLLMBase() string {
-	const def = "http://localhost:11434/v1"
-
-	// 1. llm.txt next to the executable — the release ships one here, editable
-	//    before running. Only wins if it names an active url.
-	if exe, err := os.Executable(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), "llm.txt")
-		if data, err := os.ReadFile(p); err == nil {
-			if u := parseLLMBase(data); u != "" {
-				log.Printf("using LLM backend config %s", p)
-				return u
+		if k, v, ok := strings.Cut(t, "="); ok {
+			switch strings.TrimSpace(strings.ToLower(k)) {
+			case "log":
+				val := strings.TrimSpace(strings.ToLower(v))
+				s.LogEnabled = val == "on" || val == "true" || val == "1"
+			case "log_file":
+				s.LogFile = strings.TrimSpace(v)
 			}
+			continue
+		}
+		if s.BackendURL == "" {
+			s.BackendURL = t
 		}
 	}
+	return s
+}
 
-	// 2. Per-user llm.txt in the config dir; create the default on first run
-	//    (covers `go install` / source builds with no shipped file alongside).
+// loadLLMSettings resolves settings from the per-user llm.txt, which is
+// authoritative. On first run it seeds the file with the embedded default and
+// returns defaults.
+func loadLLMSettings() LLMSettings {
+	const def = "http://localhost:11434/v1"
+	fallback := LLMSettings{BackendURL: def, LogEnabled: true}
+
 	path, err := llmConfigPath()
 	if err != nil {
-		return def
+		return fallback
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -265,11 +274,12 @@ func loadLLMBase() string {
 				log.Printf("wrote default LLM backend config to %s", path)
 			}
 		}
-		return def
+		return fallback
 	}
-	if u := parseLLMBase(data); u != "" {
-		return u
+	s := parseLLMSettings(data)
+	if s.BackendURL == "" {
+		log.Printf("no active url in %s — using default %s", path, def)
+		s.BackendURL = def
 	}
-	log.Printf("no active url in %s — using default %s", path, def)
-	return def
+	return s
 }

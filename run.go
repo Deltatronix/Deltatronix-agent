@@ -22,16 +22,32 @@ const (
 	reprobeEvery = 60 * time.Second
 )
 
-// cmdRun connects and serves forever, reconnecting with jittered backoff.
-func cmdRun() error {
+// cmdRun loads state, sets up logging, then either shows the tray (default) or
+// runs the headless connect loop. headless (via --headless or no display) forces
+// the loop with no GUI, keeping server/systemd deployments working.
+func cmdRun(headless bool) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("not paired (run `dtx-agent pair <code>` first): %w", err)
 	}
-	llmBase = loadLLMBase()
+	settings := loadLLMSettings()
+	setupLogging(settings)
+	llmBase = settings.BackendURL
 	log.Printf("LLM backend: %s", llmBase)
+
+	if !headless && !noDisplay() {
+		return runTray(cfg) // blocks until Quit; the connect loop runs in a goroutine
+	}
+	connectForever(cfg)
+	return nil
+}
+
+// connectForever serves and reconnects with jittered backoff, updating the tray
+// status line (a no-op when headless) as the connection state changes.
+func connectForever(cfg Config) {
 	url := wsURL(cfg.APIURL)
 	log.Printf("dtx-agent starting; connecting to %s as agent %s", url, cfg.AgentID)
+	setStatus("Connecting…")
 
 	backoff := backoffMin
 	for {
@@ -42,6 +58,7 @@ func cmdRun() error {
 		if err != nil {
 			log.Printf("connection ended: %v", err)
 		}
+		setStatus("Reconnecting…")
 		wait := jitter(backoff)
 		log.Printf("reconnecting in %s", wait.Round(time.Millisecond))
 		time.Sleep(wait)
@@ -87,6 +104,7 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	defer conn.CloseNow()
 	conn.SetReadLimit(1 << 20)
 	log.Printf("connected")
+	setStatus("Connected")
 
 	a := &agent{cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
 	go a.reprobeLoop()
@@ -173,6 +191,11 @@ func (a *agent) probeAndAdvertise() {
 	}
 	if probeErr == nil {
 		a.hintShown = false
+	}
+	if probeErr != nil {
+		setStatus("No LLM backend")
+	} else {
+		setStatus("Connected")
 	}
 	changed := !a.advertised || has != a.lastCap
 	a.lastCap = has

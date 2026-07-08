@@ -20,7 +20,18 @@ const defaultAPI = "https://api.deltatronix.io"
 
 func main() {
 	log.SetFlags(log.LstdFlags)
-	args := os.Args[1:]
+
+	// --headless forces the no-GUI daemon; strip it so it works before or after
+	// the subcommand (`dtx-agent run --headless`, `dtx-agent --headless`).
+	headless := false
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "--headless" {
+			headless = true
+			continue
+		}
+		args = append(args, a)
+	}
 	cmd := ""
 	if len(args) > 0 {
 		cmd = args[0]
@@ -32,13 +43,13 @@ func main() {
 			fatal(err)
 		}
 	case "run":
-		if err := cmdRun(); err != nil {
+		if err := cmdRun(headless); err != nil {
 			fatal(err)
 		}
 	case "":
 		// Default: run if paired, else show usage.
 		if _, err := loadConfig(); err == nil {
-			if err := cmdRun(); err != nil {
+			if err := cmdRun(headless); err != nil {
 				fatal(err)
 			}
 			return
@@ -51,13 +62,27 @@ func main() {
 	}
 }
 
+// noDisplay reports whether there's no GUI session, so the tray build falls back
+// to headless instead of crashing. Only Linux can plausibly run without one; on
+// macOS/Windows a desktop session is assumed.
+func noDisplay() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `dtx-agent — Deltatronix local compute agent
 
 Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
-  dtx-agent run
-  dtx-agent            (runs if already paired)
+  dtx-agent run [--headless]
+  dtx-agent            (runs if already paired; shows a system-tray icon)
+
+Without --headless, run shows a system-tray icon with a menu (Parameters File,
+Open Console, Open Logs, Quit). Use --headless (or run with no display) for
+servers/systemd.
 `)
 }
 

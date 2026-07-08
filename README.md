@@ -12,11 +12,12 @@ so there is nothing to open on your firewall.
 
 ## Install
 
-Download the binary for your OS/arch and the `llm.txt` config from the
-[latest release](https://github.com/deltatronix/dtx-agent/releases/latest), and
-keep them **in the same folder** — the agent reads `llm.txt` from next to the
-binary so you can pick your backend before the first run. Binaries are named
-`dtx-agent-<os>-<arch>` (Windows: `.exe`), for `{windows,darwin,linux} × {amd64,arm64}`.
+Download the binary for your OS/arch from the
+[latest release](https://github.com/deltatronix/dtx-agent/releases/latest). On
+first run the agent writes a per-user `llm.txt` you can edit (directly, or via the
+tray's **Parameters File** item). The `llm.txt` in the release is a reference copy.
+Binaries are named `dtx-agent-<os>-<arch>` (Windows: `.exe`); the tray build ships
+for `windows-amd64`, `darwin-{amd64,arm64}`, and `linux-amd64`.
 
 macOS / Linux one-liner (adjust `OS`/`ARCH`), into the current folder:
 
@@ -24,12 +25,11 @@ macOS / Linux one-liner (adjust `OS`/`ARCH`), into the current folder:
 OS=$(uname -s | tr '[:upper:]' '[:lower:]'); ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 base=https://github.com/deltatronix/dtx-agent/releases/latest/download
 curl -fsSL "$base/dtx-agent-${OS}-${ARCH}" -o dtx-agent && chmod +x dtx-agent
-curl -fsSL "$base/llm.txt" -o llm.txt
 ```
 
-To install on your `PATH`, move both together (e.g. `sudo mv dtx-agent llm.txt
-/usr/local/bin/`), or skip `llm.txt` and edit the per-user copy the agent creates
-on first run (see below).
+To install on your `PATH`, move the binary (e.g. `sudo mv dtx-agent
+/usr/local/bin/`). You don't need to keep `llm.txt` alongside it — the agent
+creates and reads a per-user copy on first run (see below).
 
 ## Set up Ollama
 
@@ -69,12 +69,21 @@ To switch, uncomment exactly one url line (comment the other) and restart the
 agent — the first uncommented line wins. For LM Studio, start its server from the
 **Developer** tab first.
 
-The agent looks for `llm.txt` in this order:
+The authoritative `llm.txt` is the per-user copy at
+**`os.UserConfigDir()/dtx-agent/llm.txt`**, written with the default on first run.
+Open it from the tray (**Parameters File**) or edit it directly. Backend changes
+take effect on the next restart.
 
-1. **next to the binary** — the copy shipped in the release; edit it before you
-   ever run the agent.
-2. **`os.UserConfigDir()/dtx-agent/llm.txt`** — a per-user copy, written with the
-   default on first run if step 1 found nothing (covers `go install`/source builds).
+### Logging options
+
+`llm.txt` also accepts optional `key=value` lines for logging (a bare url line
+stays the backend). Logging to a file is **on by default** so the tray build,
+which has no console, can show logs:
+
+```
+log=on                                  # on (default) | off
+log_file=/full/path/to/dtx-agent.log    # default: <config dir>/dtx-agent.log
+```
 
 ## Pair
 
@@ -94,10 +103,23 @@ the same UI (it hard-deletes the token).
 ## Run
 
 ```sh
-dtx-agent run     # or just `dtx-agent` once paired
+dtx-agent run              # system-tray icon + menu (default)
+dtx-agent run --headless   # no GUI (servers/systemd)
+dtx-agent                  # runs if already paired
 ```
 
-It connects, advertises capabilities, and processes one job at a time,
+By default `run` shows a **system-tray icon** with a native menu:
+
+- a disabled **status** line — `Connecting…` / `Connected` / `Reconnecting…` / `No LLM backend`
+- **Parameters File** — opens `llm.txt` in your editor
+- **Open Console** — a terminal streaming the log live (`tail -f`)
+- **Open Logs** — opens the log file
+- **Quit**
+
+Use `--headless` for machines with no display; the tray build also falls back to
+headless automatically when it detects no display (Linux `DISPLAY`/`WAYLAND_DISPLAY`).
+
+Either way it connects, advertises capabilities, and processes one job at a time,
 reconnecting forever with jittered exponential backoff (1s→60s).
 
 ## Autostart
@@ -136,7 +158,7 @@ Description=Deltatronix compute agent
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/dtx-agent run
+ExecStart=/usr/local/bin/dtx-agent run --headless
 Restart=always
 RestartSec=5
 
