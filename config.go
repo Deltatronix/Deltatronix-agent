@@ -36,6 +36,19 @@ func loadConfig() (Config, error) {
 	return c, err
 }
 
+// deleteConfig removes the paired-agent state, returning the app to unpaired.
+// A missing file is not an error (already unpaired).
+func deleteConfig() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func saveConfig(c Config) error {
 	path, err := configPath()
 	if err != nil {

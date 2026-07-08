@@ -144,6 +144,61 @@ func TestParseLLMSettings(t *testing.T) {
 	if s := parseLLMSettings([]byte("# only\n# comments\n")); s.BackendURL != "" {
 		t.Errorf("BackendURL = %q, want empty", s.BackendURL)
 	}
+
+	// Clean-key form: backend_url wins over a stray bare line; log_* keys parse.
+	s = parseLLMSettings([]byte("http://ignored/v1\nbackend_url=http://c/v1\nlog=off\nlog_dir=/var/log/dtx\nlog_max_size_mb=25\nlog_max_files=7\n"))
+	if s.BackendURL != "http://c/v1" {
+		t.Errorf("BackendURL = %q, want http://c/v1 (backend_url wins)", s.BackendURL)
+	}
+	if s.LogEnabled {
+		t.Errorf("LogEnabled = true, want false (log=off)")
+	}
+	if s.LogDir != "/var/log/dtx" || s.LogMaxMB != 25 || s.LogMaxKeep != 7 {
+		t.Errorf("log settings = %q/%d/%d, want /var/log/dtx/25/7", s.LogDir, s.LogMaxMB, s.LogMaxKeep)
+	}
+
+	// Bad numeric values fall back to 0 (→ caller default), not a parse failure.
+	if s := parseLLMSettings([]byte("log_max_size_mb=notanumber\n")); s.LogMaxMB != 0 {
+		t.Errorf("LogMaxMB = %d, want 0 on bad value", s.LogMaxMB)
+	}
+}
+
+func TestWriteLLMSettingsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	want := LLMSettings{
+		BackendURL: "http://localhost:1234/v1",
+		LogEnabled: false,
+		LogDir:     "/tmp/dtxlogs",
+		LogMaxMB:   50,
+		LogMaxKeep: 5,
+	}
+	if err := writeLLMSettings(want); err != nil {
+		t.Fatal(err)
+	}
+	path, err := llmConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseLLMSettings(data)
+	if got.BackendURL != want.BackendURL || got.LogEnabled != want.LogEnabled ||
+		got.LogDir != want.LogDir || got.LogMaxMB != want.LogMaxMB || got.LogMaxKeep != want.LogMaxKeep {
+		t.Errorf("round-trip mismatch:\n got  %+v\n want %+v", got, want)
+	}
+
+	// Zero size/count are written as the defaults, not 0.
+	if err := writeLLMSettings(LLMSettings{BackendURL: "http://x/v1", LogEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if g := parseLLMSettings(data); g.LogMaxMB != defaultLogMaxMB || g.LogMaxKeep != defaultLogMaxKeep {
+		t.Errorf("defaults not applied: got %d/%d, want %d/%d", g.LogMaxMB, g.LogMaxKeep, defaultLogMaxMB, defaultLogMaxKeep)
+	}
 }
 
 func TestLoadLLMSettingsCreatesAndReads(t *testing.T) {

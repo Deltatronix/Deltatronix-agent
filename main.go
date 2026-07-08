@@ -46,16 +46,21 @@ func main() {
 		if err := cmdRun(headless); err != nil {
 			fatal(err)
 		}
-	case "":
-		// Default: run if paired, else show usage.
-		if _, err := loadConfig(); err == nil {
-			if err := cmdRun(headless); err != nil {
-				fatal(err)
-			}
-			return
+	case "path":
+		if err := cmdPath(args[1:]); err != nil {
+			fatal(err)
 		}
-		usage()
-		os.Exit(2)
+	case "autostart":
+		if err := cmdAutostart(args[1:]); err != nil {
+			fatal(err)
+		}
+	case "":
+		// Default: open the GUI (it handles the unpaired case in-window). On a
+		// headless build or a display-less machine this runs the connect loop,
+		// which requires an already-paired config.
+		if err := cmdRun(headless); err != nil {
+			fatal(err)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -78,11 +83,16 @@ func usage() {
 Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
   dtx-agent run [--headless]
-  dtx-agent            (runs if already paired; shows a system-tray icon)
+  dtx-agent autostart enable [--headless] [--mode xdg|systemd]
+  dtx-agent autostart disable
+  dtx-agent path add
+  dtx-agent path remove
+  dtx-agent            (opens the window; runs headless if no display)
 
-Without --headless, run shows a system-tray icon with a menu (Parameters File,
-Open Console, Open Logs, Quit). Use --headless (or run with no display) for
-servers/systemd.
+Without --headless, run opens a window (Status, Settings, About) and a
+system-tray icon (Current Status, Open, Quit). Use --headless (or run with no
+display) for servers/systemd/Docker. The autostart and path commands work in
+both the GUI and headless builds.
 `)
 }
 
@@ -112,6 +122,24 @@ func cmdPair(args []string) error {
 		return errors.New("usage: dtx-agent pair <code> [--api URL]")
 	}
 
+	apiURL := strings.TrimRight(*api, "/")
+	cfg, err := pairWithCode(context.Background(), apiURL, code)
+	if err != nil {
+		return err
+	}
+	path, _ := configPath()
+	fmt.Printf("Paired as agent %s. Config saved to %s\n", cfg.AgentID, path)
+	fmt.Println("Start the agent with:  dtx-agent run")
+	return nil
+}
+
+// pairWithCode exchanges a pairing code for an agent token, saves the config,
+// and returns it. Shared by the CLI `pair` command and the GUI Status page.
+func pairWithCode(ctx context.Context, apiURL, code string) (Config, error) {
+	var cfg Config
+	if code == "" {
+		return cfg, errors.New("pairing code is required")
+	}
 	name, err := os.Hostname()
 	if err != nil || name == "" {
 		name = "dtx-agent"
@@ -122,44 +150,70 @@ func cmdPair(args []string) error {
 		"platform": runtime.GOOS + "/" + runtime.GOARCH,
 	})
 	if err != nil {
-		return err
+		return cfg, err
 	}
 
-	apiURL := strings.TrimRight(*api, "/")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	apiURL = strings.TrimRight(apiURL, "/")
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/compute/agents/pair", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, apiURL+"/compute/agents/pair", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return cfg, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "dtx-agent") // satisfies the backend CSRF guard
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("contacting %s: %w", apiURL, err)
+		return cfg, fmt.Errorf("contacting %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("pairing failed (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+		return cfg, fmt.Errorf("pairing failed (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 	var out struct {
 		AgentToken string `json:"agentToken"`
 		AgentID    string `json:"agentId"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return fmt.Errorf("decoding pair response: %w", err)
+		return cfg, fmt.Errorf("decoding pair response: %w", err)
 	}
 	if out.AgentToken == "" || out.AgentID == "" {
-		return errors.New("pair response missing agentToken/agentId")
+		return cfg, errors.New("pair response missing agentToken/agentId")
 	}
 
-	if err := saveConfig(Config{APIURL: apiURL, AgentID: out.AgentID, AgentToken: out.AgentToken}); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	cfg = Config{APIURL: apiURL, AgentID: out.AgentID, AgentToken: out.AgentToken}
+	if err := saveConfig(cfg); err != nil {
+		return cfg, fmt.Errorf("saving config: %w", err)
 	}
-	path, _ := configPath()
-	fmt.Printf("Paired as agent %s (%s). Config saved to %s\n", out.AgentID, name, path)
-	fmt.Println("Start the agent with:  dtx-agent run")
+	return cfg, nil
+}
+
+// revokeAgent best-effort tells the backend to invalidate this agent's token,
+// then the caller deletes the local config. Errors are returned for logging but
+// must not block local disconnect.
+func revokeAgent(ctx context.Context, cfg Config) error {
+	if cfg.APIURL == "" || cfg.AgentID == "" {
+		return nil
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	url := strings.TrimRight(cfg.APIURL, "/") + "/compute/agents/" + cfg.AgentID
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
+	req.Header.Set("X-Requested-With", "dtx-agent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("contacting %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
 	return nil
 }

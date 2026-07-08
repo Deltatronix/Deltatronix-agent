@@ -22,48 +22,99 @@ const (
 	reprobeEvery = 60 * time.Second
 )
 
-// cmdRun loads state, sets up logging, then either shows the tray (default) or
-// runs the headless connect loop. headless (via --headless or no display) forces
-// the loop with no GUI, keeping server/systemd deployments working.
+// cmdRun sets up logging, then either shows the GUI window (default) or runs the
+// headless connect loop. headless (via --headless or no display) forces the loop
+// with no GUI, keeping server/systemd/Docker deployments working. The GUI handles
+// the unpaired case itself (pairing happens in-window); the headless path
+// requires an already-paired config.
 func cmdRun(headless bool) error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return fmt.Errorf("not paired (run `dtx-agent pair <code>` first): %w", err)
-	}
 	settings := loadLLMSettings()
 	setupLogging(settings)
 	llmBase = settings.BackendURL
 	log.Printf("LLM backend: %s", llmBase)
 
 	if !headless && !noDisplay() {
-		return runTray(cfg) // blocks until Quit; the connect loop runs in a goroutine
+		return runGUI() // opens the window; owns the connect loop; blocks until Quit
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("not paired (run `dtx-agent pair <code>` first): %w", err)
 	}
 	connectForever(cfg)
 	return nil
 }
 
-// connectForever serves and reconnects with jittered backoff, updating the tray
-// status line (a no-op when headless) as the connection state changes.
+// connectForever runs the connect loop until the process exits — the headless
+// entrypoint.
 func connectForever(cfg Config) {
+	connectLoop(context.Background(), cfg)
+}
+
+// connectLoop serves and reconnects with jittered backoff, broadcasting status
+// as the connection state changes, until ctx is cancelled. The GUI cancels ctx
+// (via supervisor.stop) to disconnect live; headless passes a background ctx.
+func connectLoop(ctx context.Context, cfg Config) {
 	url := wsURL(cfg.APIURL)
 	log.Printf("dtx-agent starting; connecting to %s as agent %s", url, cfg.AgentID)
-	setStatus("Connecting…")
+	setStatus(statusConnecting)
 
 	backoff := backoffMin
 	for {
-		connected, err := serve(context.Background(), cfg, url)
+		if ctx.Err() != nil {
+			return
+		}
+		connected, err := serve(ctx, cfg, url)
 		if connected {
 			backoff = backoffMin
 		}
 		if err != nil {
 			log.Printf("connection ended: %v", err)
 		}
-		setStatus("Reconnecting…")
+		if ctx.Err() != nil {
+			return
+		}
+		setStatus(statusReconnecting)
 		wait := jitter(backoff)
 		log.Printf("reconnecting in %s", wait.Round(time.Millisecond))
-		time.Sleep(wait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
 		backoff = min(backoff*2, backoffMax)
 	}
+}
+
+// supervisor runs connectLoop under a cancellable context so the GUI can pair
+// (start) and disconnect (stop) without restarting the process. Unused in the
+// headless build, which calls connectForever directly.
+type supervisor struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// start launches the connect loop for cfg if not already running.
+func (s *supervisor) start(cfg Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	go connectLoop(ctx, cfg)
+}
+
+// stop cancels the connect loop and resets status to unpaired.
+func (s *supervisor) stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
+	setStatus(statusNotPaired)
 }
 
 func jitter(d time.Duration) time.Duration {
@@ -193,9 +244,9 @@ func (a *agent) probeAndAdvertise() {
 		a.hintShown = false
 	}
 	if probeErr != nil {
-		setStatus("No LLM backend")
+		setStatus(statusNoLLM)
 	} else {
-		setStatus("Connected")
+		setStatus(statusConnected)
 	}
 	changed := !a.advertised || has != a.lastCap
 	a.lastCap = has

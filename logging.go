@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // resolvedLogPath is the log file in use after setupLogging, exposed to the tray
@@ -36,27 +38,41 @@ func logPath() string {
 	return defaultLogPath()
 }
 
-// setupLogging tees the standard logger to a file (in addition to stderr) so the
-// no-console tray build still has readable logs. When disabled via llm.txt, logs
-// go to stderr only. ponytail: single append file, no rotation — add if it grows.
+// resolveLogPath picks the active log file: an explicit legacy log_file= wins,
+// else <log_dir>/dtx-agent.log, else the default dir.
+func resolveLogPath(s LLMSettings) string {
+	if s.LogFile != "" {
+		return s.LogFile
+	}
+	if s.LogDir != "" {
+		return filepath.Join(s.LogDir, "dtx-agent.log")
+	}
+	return defaultLogPath()
+}
+
+// setupLogging tees the standard logger to a size-rotating file (in addition to
+// stderr) so the no-console tray build still has readable logs. When disabled
+// via llm.txt, logs go to stderr only. Rotation is handled by lumberjack:
+// MaxSize (MB) and MaxBackups map to the log_max_size_mb / log_max_files keys.
 func setupLogging(s LLMSettings) {
 	if !s.LogEnabled {
 		return
 	}
-	path := s.LogFile
-	if path == "" {
-		path = defaultLogPath()
-	}
+	path := resolveLogPath(s)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		log.Printf("log dir %s: %v (logging to stderr only)", filepath.Dir(path), err)
 		return
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		log.Printf("open log %s: %v (logging to stderr only)", path, err)
-		return
+	maxMB := s.LogMaxMB
+	if maxMB == 0 {
+		maxMB = defaultLogMaxMB
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	maxKeep := s.LogMaxKeep
+	if maxKeep == 0 {
+		maxKeep = defaultLogMaxKeep
+	}
+	w := &lumberjack.Logger{Filename: path, MaxSize: maxMB, MaxBackups: maxKeep}
+	log.SetOutput(io.MultiWriter(os.Stderr, w))
 	logMu.Lock()
 	resolvedLogPath = path
 	logMu.Unlock()

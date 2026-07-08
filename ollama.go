@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"golang.org/x/image/webp"
@@ -21,7 +22,7 @@ import (
 // llmBase is the OpenAI-compatible API base URL (ending in /v1). Ollama serves
 // it at :11434/v1, LM Studio at :1234/v1, and so do llama.cpp, vLLM, LocalAI…
 // It's a var (not const) so loadLLMBase and tests can point it elsewhere.
-var llmBase = "http://localhost:11434/v1"
+var llmBase = defaultBackendURL
 
 // probeModels returns the model ids the server has loaded, or an error if the
 // server is unreachable. Uses the OpenAI-compatible GET /v1/models.
@@ -225,13 +226,18 @@ func llmConfigPath() (string, error) {
 type LLMSettings struct {
 	BackendURL string
 	LogEnabled bool
-	LogFile    string // "" → caller's default (<config dir>/dtx-agent.log)
+	LogFile    string // legacy: full path to a single log file (no rotation)
+	LogDir     string // "" → caller's default (<config dir>/dtx-agent)
+	LogMaxMB   int    // rotate at this size; 0 → default
+	LogMaxKeep int    // keep this many rotated files; 0 → default
 }
 
 // parseLLMSettings reads llm.txt. The first bare line (not a comment, not
-// key=value) is the backend URL — the original "first url wins" rule. Recognized
-// key=value lines set logging options; unknown keys are ignored.
-// ponytail: whole-line comments only; two known keys (log, log_file), no levels/rotation.
+// key=value) is the backend URL — the original "first url wins" rule, kept for
+// hand-edited files. Recognized key=value lines override it and set logging;
+// unknown keys are ignored. The GUI writes the clean key=value form
+// (writeLLMSettings); both forms parse here.
+// ponytail: whole-line comments only, no inline-comment stripping on values.
 func parseLLMSettings(data []byte) LLMSettings {
 	s := LLMSettings{LogEnabled: true} // logging on by default
 	for _, line := range strings.Split(string(data), "\n") {
@@ -240,12 +246,21 @@ func parseLLMSettings(data []byte) LLMSettings {
 			continue
 		}
 		if k, v, ok := strings.Cut(t, "="); ok {
+			v = strings.TrimSpace(v)
 			switch strings.TrimSpace(strings.ToLower(k)) {
+			case "backend_url":
+				s.BackendURL = v // clean-key form wins over a bare url line
 			case "log":
-				val := strings.TrimSpace(strings.ToLower(v))
-				s.LogEnabled = val == "on" || val == "true" || val == "1"
+				lv := strings.ToLower(v)
+				s.LogEnabled = lv == "on" || lv == "true" || lv == "1"
 			case "log_file":
-				s.LogFile = strings.TrimSpace(v)
+				s.LogFile = v
+			case "log_dir":
+				s.LogDir = v
+			case "log_max_size_mb":
+				s.LogMaxMB = atoiSafe(v)
+			case "log_max_files":
+				s.LogMaxKeep = atoiSafe(v)
 			}
 			continue
 		}
@@ -256,12 +271,29 @@ func parseLLMSettings(data []byte) LLMSettings {
 	return s
 }
 
+// atoiSafe parses a non-negative int, returning 0 on any error (so a bad value
+// falls back to the caller's default rather than breaking the whole file).
+func atoiSafe(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// Backend and logging defaults, in one place. defaultBackendURL is Ollama's
+// OpenAI-compatible endpoint; keep the llmBase var (top of file) in sync.
+const (
+	defaultBackendURL = "http://localhost:11434/v1"
+	defaultLogMaxMB   = 10
+	defaultLogMaxKeep = 3
+)
+
 // loadLLMSettings resolves settings from the per-user llm.txt, which is
 // authoritative. On first run it seeds the file with the embedded default and
 // returns defaults.
 func loadLLMSettings() LLMSettings {
-	const def = "http://localhost:11434/v1"
-	fallback := LLMSettings{BackendURL: def, LogEnabled: true}
+	fallback := LLMSettings{BackendURL: defaultBackendURL, LogEnabled: true}
 
 	path, err := llmConfigPath()
 	if err != nil {
@@ -278,8 +310,49 @@ func loadLLMSettings() LLMSettings {
 	}
 	s := parseLLMSettings(data)
 	if s.BackendURL == "" {
-		log.Printf("no active url in %s — using default %s", path, def)
-		s.BackendURL = def
+		log.Printf("no active url in %s — using default %s", path, defaultBackendURL)
+		s.BackendURL = defaultBackendURL
 	}
 	return s
+}
+
+// writeLLMSettings regenerates llm.txt from a fixed commented template using the
+// clean key=value form. Called by the GUI Settings page. This does not preserve
+// a user's hand-written comments or free-form edits — the GUI is now the source
+// of truth. Headless users can still hand-edit; parseLLMSettings reads both forms.
+func writeLLMSettings(s LLMSettings) error {
+	path, err := llmConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	logVal := "on"
+	if !s.LogEnabled {
+		logVal = "off"
+	}
+	maxMB := s.LogMaxMB
+	if maxMB == 0 {
+		maxMB = defaultLogMaxMB
+	}
+	maxKeep := s.LogMaxKeep
+	if maxKeep == 0 {
+		maxKeep = defaultLogMaxKeep
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `# Deltatronix agent — local LLM backend (OpenAI-compatible API).
+# Managed by the Settings window; hand-edits are overwritten when you save there.
+# Headless users may edit these keys directly, then restart: dtx-agent run
+
+# Backend URL — Ollama :11434/v1, LM Studio :1234/v1, or any OpenAI-compatible server.
+backend_url=%s
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+log=%s
+log_dir=%s
+log_max_size_mb=%d
+log_max_files=%d
+`, s.BackendURL, logVal, s.LogDir, maxMB, maxKeep)
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
