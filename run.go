@@ -243,10 +243,13 @@ func (a *agent) probeAndAdvertise() {
 	if probeErr == nil {
 		a.hintShown = false
 	}
-	if probeErr != nil {
+	switch {
+	case probeErr != nil:
 		setStatus(statusNoLLM)
-	} else {
+	case has:
 		setStatus(statusConnected)
+	default:
+		setStatus(statusNoVisionModel)
 	}
 	changed := !a.advertised || has != a.lastCap
 	a.lastCap = has

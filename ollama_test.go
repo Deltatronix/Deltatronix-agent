@@ -11,21 +11,22 @@ import (
 )
 
 func TestHasVisionModel(t *testing.T) {
-	installed := []string{"gemma3:4b", "llama3.2:latest"}
-
 	cases := []struct {
 		name       string
+		installed  []string
 		acceptable []string
 		want       bool
 	}{
-		{"exact tag match", []string{"gemma3:4b"}, true},
-		{"base name matches installed tag", []string{"gemma3"}, true},
-		{"acceptable tag vs installed base", []string{"llama3.2"}, true},
-		{"not installed", []string{"qwen2.5vl"}, false},
-		{"empty acceptable", []string{}, false},
+		{"exact tag match", []string{"gemma3:4b", "llama3.2:latest"}, []string{"gemma3:4b"}, true},
+		{"base name matches installed tag", []string{"gemma3:4b", "llama3.2:latest"}, []string{"gemma3"}, true},
+		{"acceptable tag vs installed base", []string{"gemma3:4b", "llama3.2:latest"}, []string{"llama3.2"}, true},
+		{"not installed", []string{"gemma3:4b", "llama3.2:latest"}, []string{"qwen2.5vl"}, false},
+		{"empty acceptable", []string{"gemma3:4b", "llama3.2:latest"}, []string{}, false},
+		{"lm studio publisher id", []string{"google/gemma-4-31b-qat", "text-embedding-nomic-embed-text-v1.5"}, []string{"gemma4", "gemma3:4b"}, true},
+		{"lm studio embedding only", []string{"text-embedding-nomic-embed-text-v1.5"}, []string{"gemma4", "gemma3:4b", "llava"}, false},
 	}
 	for _, c := range cases {
-		if got := hasVisionModel(installed, c.acceptable); got != c.want {
+		if got := hasVisionModel(c.installed, c.acceptable); got != c.want {
 			t.Errorf("%s: hasVisionModel(%v) = %v, want %v", c.name, c.acceptable, got, c.want)
 		}
 	}
@@ -241,6 +242,8 @@ func TestPickModel(t *testing.T) {
 		{"acceptable fallback", "gemma3:4b", []string{"mistral:7b", "llava:13b"}, "llava:13b"},
 		{"nothing usable keeps preference", "gemma3:4b", []string{"mistral:7b"}, "gemma3:4b"},
 		{"no models installed", "gemma3:4b", nil, "gemma3:4b"},
+		{"lm studio id via normalized match", "gemma4", []string{"text-embedding-nomic-embed-text-v1.5", "google/gemma-4-31b-qat"}, "google/gemma-4-31b-qat"},
+		{"normalized acceptable fallback", "gemma3:4b", []string{"llava-v1.6"}, "llava-v1.6"},
 	}
 	for _, c := range cases {
 		if got := pickModel(c.preferred, c.installed, acceptable); got != c.want {

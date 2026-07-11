@@ -57,13 +57,11 @@ func probeModels(ctx context.Context) ([]string, error) {
 }
 
 // hasVisionModel reports whether any installed model satisfies the server's
-// acceptable-model list. Match is exact, or on the base name (ignoring the
-// `:tag`) so "gemma3:4b" installed satisfies acceptable "gemma3" and vice versa.
+// acceptable-model list, across naming conventions (see modelsMatch).
 func hasVisionModel(installed, acceptable []string) bool {
-	base := func(s string) string { return strings.SplitN(s, ":", 2)[0] }
 	for _, want := range acceptable {
 		for _, got := range installed {
-			if got == want || base(got) == base(want) {
+			if modelsMatch(got, want) {
 				return true
 			}
 		}
@@ -72,11 +70,12 @@ func hasVisionModel(installed, acceptable []string) bool {
 }
 
 // pickModel returns the installed model name to run: the server's preference
-// when installed (exact first, then base-name match so preferred "gemma3:4b"
-// resolves to an installed "gemma3:12b"), else any installed model from the
-// acceptable list, else the preference verbatim (Ollama will report it missing).
-// The server names its top preference blind — it only knows capabilities, not
-// which models this machine actually has (ADR-0022).
+// when installed (exact first, then base-name match, then normalized match so
+// preferred "gemma4" resolves to LM Studio's "google/gemma-4-31b-qat"), else
+// any installed model from the acceptable list, else the preference verbatim
+// (the backend will report it missing). The server names its top preference
+// blind — it only knows capabilities, not which models this machine actually
+// has (ADR-0022).
 func pickModel(preferred string, installed, acceptable []string) string {
 	base := func(s string) string { return strings.SplitN(s, ":", 2)[0] }
 	for _, got := range installed {
@@ -89,14 +88,56 @@ func pickModel(preferred string, installed, acceptable []string) string {
 			return got
 		}
 	}
+	for _, got := range installed {
+		if modelsMatch(got, preferred) {
+			return got
+		}
+	}
 	for _, want := range acceptable {
 		for _, got := range installed {
-			if got == want || base(got) == base(want) {
+			if modelsMatch(got, want) {
 				return got
 			}
 		}
 	}
 	return preferred
+}
+
+// modelsMatch reports whether an installed model id satisfies an acceptable
+// one. Exact, or same base name ignoring the ":tag" (Ollama's "gemma3:12b"
+// satisfies "gemma3:4b"), or — normalized — one id a prefix of the other, so
+// LM Studio's "google/gemma-4-31b-qat" satisfies "gemma4".
+func modelsMatch(installed, acceptable string) bool {
+	if installed == acceptable {
+		return true
+	}
+	base := func(s string) string { return strings.SplitN(s, ":", 2)[0] }
+	if base(installed) == base(acceptable) {
+		return true
+	}
+	ni, na := normalizeModel(installed), normalizeModel(acceptable)
+	if ni == "" || na == "" {
+		return false
+	}
+	return strings.HasPrefix(ni, na) || strings.HasPrefix(na, ni)
+}
+
+// normalizeModel canonicalizes a model id for cross-convention matching:
+// lowercase, publisher prefix ("google/") dropped, ":tag" dropped, and
+// separator characters removed, so Ollama's "gemma4:latest" and LM Studio's
+// "google/gemma-4-31b-qat" both reduce to comparable strings.
+func normalizeModel(s string) string {
+	s = strings.ToLower(s)
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.SplitN(s, ":", 2)[0]
+	return strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || r == '.' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // toOllamaImage makes downloaded bytes acceptable to Ollama's image loader,

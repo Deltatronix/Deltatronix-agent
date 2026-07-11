@@ -5,11 +5,12 @@ import "sync"
 // Connection-status strings, shared by the tray line and the GUI Status page so
 // both show the same wording.
 const (
-	statusNotPaired    = "Not paired"
-	statusConnecting   = "Connecting…"
-	statusConnected    = "Connected"
-	statusReconnecting = "Reconnecting…"
-	statusNoLLM        = "No LLM backend"
+	statusNotPaired     = "Not paired"
+	statusConnecting    = "Connecting…"
+	statusConnected     = "Connected"
+	statusReconnecting  = "Reconnecting…"
+	statusNoLLM         = "No LLM backend"
+	statusNoVisionModel = "Connected — no vision model"
 )
 
 // Status is broadcast from the connect loop to any observers (the tray menu
