@@ -1,169 +1,197 @@
-# dtx-agent — Deltatronix local compute agent
+# Deltatronix Agent
 
-A single static Go binary that runs AI/compute jobs on **your** hardware for
-Deltatronix. Phase 1 does local vision-LLM jobs via any OpenAI-compatible local
-server ([Ollama](https://ollama.com) by default, or [LM Studio](https://lmstudio.ai),
-llama.cpp, …): the platform sends a photo, a prompt, and a response schema; the
-agent runs them against your local model and returns JSON. Prompts and feature
-meaning live server-side — you never have to update the agent to get new AI features.
+Run Deltatronix AI vision tasks on your own computer. The agent connects your
+Deltatronix account to a local model server, processes assigned tasks, and sends
+the results back to Deltatronix.
 
-The agent is **outbound-only** (it dials `wss://api.deltatronix.io/compute/ws`),
-so there is nothing to open on your firewall.
+Use the desktop app for a window and system-tray controls, or the headless version
+for a terminal or server. The agent initiates its connection to Deltatronix, so
+you do not need to set up port forwarding.
 
-## Install
+## What you need
 
-Download the binary for your OS/arch from the
-[latest release](https://github.com/deltatronix/dtx-agent/releases/latest). On
-first run the agent writes a per-user `llm.txt`; edit it via the **Settings**
-window or directly. The `llm.txt` in the release is a reference copy. Desktop
-binaries are named `dtx-agent-<os>-<arch>` (Windows: `.exe`) and ship for
-`windows-amd64`, `darwin-{amd64,arm64}`, and `linux-amd64`. A CGO-free
-`dtx-agent-linux-amd64-headless` binary (no GUI) is also published for
-servers/containers — see [Docker](#docker).
+- **Git and Go 1.26 or newer** to build the agent.
+- **A local model server**, such as [Ollama](https://ollama.com/download) or
+  [LM Studio](https://lmstudio.ai), with a compatible vision model installed.
+- **A Deltatronix account and pairing code** to connect the agent and receive tasks.
 
-macOS / Linux one-liner (adjust `OS`/`ARCH`), into the current folder:
+You can build this repository on its own. Pairing and running Deltatronix tasks
+require access to the Deltatronix service. The agent does not include a model
+server or download models for you.
 
-```sh
-OS=$(uname -s | tr '[:upper:]' '[:lower:]'); ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-base=https://github.com/deltatronix/dtx-agent/releases/latest/download
-curl -fsSL "$base/dtx-agent-${OS}-${ARCH}" -o dtx-agent && chmod +x dtx-agent
-```
+## Build from source
 
-To run it as a bare command, use the **Add to PATH** button in Settings or
-`dtx-agent path add` (symlinks into `/usr/local/bin`, prompting for admin on
-macOS/Linux; edits the per-user PATH on Windows). You don't need to keep
-`llm.txt` alongside the binary — the agent creates and reads a per-user copy on
-first run (see below).
-
-## Set up Ollama
-
-The agent does not bundle inference — Ollama owns the models and GPU drivers.
-
-- **Windows:** `winget install Ollama.Ollama`
-- **macOS:** `brew install ollama` (or download from <https://ollama.com/download>)
-- **Linux:** `curl -fsSL https://ollama.com/install.sh | sh`
-
-Then pull a vision model. The server decides which models are acceptable; if
-Ollama is missing one, the agent prints the exact `ollama pull …` command on
-start. A common choice:
+Clone this repository, or fork it first and use your fork's URL:
 
 ```sh
-ollama pull gemma3:4b
+git clone https://github.com/Deltatronix/Deltatronix-agent.git
+cd Deltatronix-agent
 ```
 
-The agent advertises the `llm.vision` capability only while an acceptable vision
-model is installed, and re-checks every 60s.
+Choose one of the following builds. Go downloads the required packages during
+the first build.
 
-## Choosing the LLM backend
+### Desktop app
 
-The agent speaks the **OpenAI-compatible API**, so it works with any local server
-that exposes one — Ollama (default), [LM Studio](https://lmstudio.ai), llama.cpp,
-vLLM, LocalAI, … It picks the backend from a plain-text `llm.txt`:
+The desktop app uses Fyne and requires a C compiler and platform development
+libraries. Follow the [Fyne setup guide](https://docs.fyne.io/started/) for your
+operating system. On macOS, install the Xcode Command Line Tools; on Windows,
+use a compatible C compiler as described in that guide.
 
-```
-backend_url=http://localhost:11434/v1     # Ollama (default); LM Studio: :1234/v1
-```
-
-Set it in the **Settings** window (with one-click **Ollama** / **LM Studio**
-buttons) — saving rewrites `llm.txt` and offers to restart. For LM Studio, start
-its server from the **Developer** tab first. Headless users edit the key directly
-and restart. Legacy files with a bare url line still work — the first uncommented
-line wins if `backend_url=` is absent.
-
-The authoritative `llm.txt` is the per-user copy at
-**`os.UserConfigDir()/dtx-agent/llm.txt`**, written with the default on first run.
-Backend changes take effect on the next restart.
-
-### Logging options
-
-`llm.txt` also accepts `key=value` lines for logging. Logging to a rotating file
-is **on by default** so the GUI/tray build, which has no console, can show logs:
-
-```
-log=on                # on (default) | off
-log_dir=              # folder for dtx-agent.log (default: the config folder)
-log_max_size_mb=10    # rotate each file at this size
-log_max_files=3       # rotated files to keep before overwriting
-```
-
-Set these in **Settings**, or edit directly for headless. Rotation is handled by
-[lumberjack](https://github.com/natefinch/lumberjack). The legacy
-`log_file=/full/path` key (single file, no rotation) is still honored.
-
-## Pair
-
-In the Deltatronix UI: **Settings → Local agents → Add agent** to get an 8-char
-pairing code (valid 10 minutes). Then either paste it into the **Status** page of
-the agent window, or from the CLI:
+On Ubuntu or Debian, install the desktop dependencies:
 
 ```sh
-dtx-agent pair <code>
-# custom backend:
-dtx-agent pair <code> --api https://api.deltatronix.io
+sudo apt-get update
+sudo apt-get install -y build-essential libgtk-3-dev libayatana-appindicator3-dev libgl1-mesa-dev xorg-dev libxkbcommon-dev
 ```
 
-This stores `{ apiUrl, agentId, agentToken }` in
-`os.UserConfigDir()/dtx-agent/config.json` (mode `0600`). **Disconnect** (Status
-page) best-effort revokes the token server-side, then deletes the local config so
-you can pair a different profile. Revoking from the platform UI also works.
-
-## Run
+Build on macOS or Linux:
 
 ```sh
-dtx-agent run              # window + system-tray icon (default)
-dtx-agent run --headless   # no GUI (servers/systemd/Docker)
-dtx-agent                  # same as `run`
+CGO_ENABLED=1 go build -tags gui -o dtx-agent .
+./dtx-agent
 ```
 
-By default `run` opens a **window** with a left sidebar:
+Build on Windows using PowerShell:
 
-- **Status** — platform connection + local LLM-backend health, plus pairing (when
-  unpaired) and Disconnect (when paired)
-- **Settings** — backend URL, live-log console, log file/rotation options, Add to
-  PATH, and Start-on-login
-- **About** — version and what the agent does
+```powershell
+$env:CGO_ENABLED = "1"
+go build -tags gui -ldflags "-H=windowsgui" -o dtx-agent.exe .
+.\dtx-agent.exe
+```
 
-Closing the window hides it to the **system tray** (**Current Status**, **Open**,
-**Quit**); the app keeps running. When already paired it starts hidden in the tray;
-when unpaired it opens the window so you can pair.
+### Headless agent
 
-Use `--headless` for machines with no display; the GUI build also falls back to
-headless automatically when it detects no display (Linux `DISPLAY`/`WAYLAND_DISPLAY`).
-Either way it connects, advertises capabilities, and processes one job at a time,
-reconnecting forever with jittered exponential backoff (1s→60s).
-
-## Autostart
-
-Toggle **Start on login** in Settings, or use the CLI (works in the headless build
-too — handy on servers):
+This build has no window or tray icon and does not require the desktop libraries:
 
 ```sh
-dtx-agent autostart enable                     # launch the GUI app on login
-dtx-agent autostart enable --headless          # launch `run --headless` (servers)
-dtx-agent autostart enable --mode systemd      # Linux: systemd --user instead of XDG
-dtx-agent autostart disable
+go build -o dtx-agent .
 ```
 
-Under the hood: macOS a LaunchAgent plist (`~/Library/LaunchAgents/io.deltatronix.agent.plist`),
-Windows an HKCU `…\Run` value, Linux either an XDG `~/.config/autostart/dtx-agent.desktop`
-(default) or a `~/.config/systemd/user/dtx-agent.service`. All are per-user (no admin).
+On Windows, use `go build -o dtx-agent.exe .` and run commands with
+`.\dtx-agent.exe` instead of `./dtx-agent`.
 
-## Docker
+Pair the agent before starting it, as described below. Always use
+`run --headless` with this build.
 
-The headless binary is CGO-free and runs on a minimal base — see [`Dockerfile`](Dockerfile).
-Pair once on any machine, then mount the resulting `config.json` into the container:
+## Connect your agent
+
+### 1. Start your local model server
+
+Install and start Ollama or LM Studio. In LM Studio, load a vision model and
+start its local server from the **Developer** tab.
+
+The default connection is Ollama at `http://localhost:11434/v1`. For LM Studio,
+open the agent's **Settings**, select **LM Studio**, save, and restart. Its
+default URL is `http://localhost:1234/v1`.
+
+For a headless setup, edit the per-user `llm.txt` file described under
+[Configuration](#configuration). Running `./dtx-agent run --headless` once creates
+that file, even if the agent has not been paired yet.
+
+### 2. Pair with Deltatronix
+
+In Deltatronix, open **Settings → Local agents → Add agent** and get a pairing
+code. Enter it on the desktop app's **Status** page and select **Pair**.
+
+From a terminal, replace `YOUR_PAIRING_CODE` with your code:
 
 ```sh
-docker build -t dtx-agent .
-docker run --rm \
-  -v "$PWD/config.json:/home/nonroot/.config/dtx-agent/config.json:ro" \
-  dtx-agent
+./dtx-agent pair YOUR_PAIRING_CODE
+./dtx-agent run --headless
 ```
 
-## Contract notes
+### 3. Check that the agent is ready
 
-- WebSocket frames follow `Deltatronix-backend/docs/plans/compute-agents-phase-1.md` §1.
-- The `job.assign` frame is specified with both an envelope `type` (`"job.assign"`)
-  and a job `type` field — a duplicate JSON key. The agent routes on frame kind
-  and falls back to payload-presence, so it handles the assignment whichever way
-  the backend serializes that key.
+The **Status** page shows the Deltatronix connection and local model server
+status. The agent checks for a compatible vision model and reports missing
+models in its logs. Install a model requested by the agent; with Ollama, use
+`ollama pull` followed by the model name shown in the log.
+
+Keep the model server and agent running while you use local AI features in
+Deltatronix. The agent retries automatically if a connection is interrupted.
+
+## Everyday use
+
+- **Open the desktop app:** run `./dtx-agent`.
+- **Find a running app:** use its system-tray icon and select **Open**. A paired
+  agent starts in the tray; closing its window keeps it running.
+- **Stop the desktop app:** select **Quit** from the tray menu.
+- **Run without a window:** use `./dtx-agent run --headless`; press Ctrl+C to stop
+  an agent running in your terminal.
+- **Disconnect your account:** select **Disconnect** on the desktop **Status**
+  page, or revoke the agent from Deltatronix.
+- **Start on login:** enable **Start automatically on login** in Settings.
+
+The startup and PATH options are also available from a terminal:
+
+| Action | Command |
+| --- | --- |
+| Start the desktop app on login | `./dtx-agent autostart enable` |
+| Start the headless agent on login | `./dtx-agent autostart enable --headless` |
+| Turn off startup on login | `./dtx-agent autostart disable` |
+| Add the agent to PATH | `./dtx-agent path add` |
+| Remove it from PATH | `./dtx-agent path remove` |
+
+Choose the startup command that matches your build. On Linux, add
+`--mode systemd` to `autostart enable --headless` to use a user systemd service.
+After adding the agent to PATH, you can use `dtx-agent` without the `./` prefix.
+
+## Configuration
+
+The agent stores its settings in your user configuration folder:
+
+| Operating system | Default folder |
+| --- | --- |
+| macOS | `~/Library/Application Support/dtx-agent/` |
+| Linux | `~/.config/dtx-agent/` (or `$XDG_CONFIG_HOME/dtx-agent/` if set) |
+| Windows | `%AppData%\dtx-agent\` |
+
+- **`llm.txt`** contains the model server URL and logging settings. The agent
+  creates it on first run. Edit it through **Settings**, or directly for a
+  headless setup, then restart the agent.
+- **`config.json`** stores your pairing credentials. Keep it private and out of
+  your fork or commits.
+- **`dtx-agent.log`** contains runtime logs by default. Desktop users can also
+  view logs in **Settings**.
+
+Example `llm.txt`:
+
+```ini
+backend_url=http://localhost:11434/v1
+log=on
+log_dir=
+log_max_size_mb=10
+log_max_files=3
+```
+
+Leave `log_dir` empty to keep logs in the configuration folder. The
+[`llm.txt`](llm.txt) in this repository is the default template; edit your
+per-user copy to change the running agent's settings.
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| “This build has no GUI” | Run with `run --headless`, or rebuild with `-tags gui` for the desktop app. |
+| “Not paired” | Pair from the desktop Status page or run `./dtx-agent pair YOUR_PAIRING_CODE`. |
+| Model server is unreachable | Start your model server and check `backend_url` in Settings or `llm.txt`. |
+| Connected, but no vision model is available | Check the logs for the requested model and install or load it in your model server. |
+| The desktop window is missing | Check the system tray and select **Open**. |
+| Desktop build fails on graphics or C libraries | Check the Fyne prerequisites and the desktop dependencies listed above. |
+
+## Development
+
+Run the tests with:
+
+```sh
+go test ./...
+```
+
+The [`Dockerfile`](Dockerfile) builds a headless container. Mount your paired
+`config.json` and your `llm.txt` in `/home/nonroot/.config/dtx-agent/`. Set
+`backend_url` to a model server address the container can reach; inside a
+container, `localhost` refers to the container itself.
+
+Issues and pull requests are disabled for this repository. Developers can fork,
+clone, and build the agent, and keep their changes in their own forks.
