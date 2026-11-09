@@ -295,11 +295,13 @@ func buildSettingsPage(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	// take effect (they are read once at startup).
 	saveBtn := widget.NewButton("Save changes (restart)", func() {
 		ns := LLMSettings{
-			BackendURL: backend.Text,
-			LogEnabled: logsChk.Checked,
-			LogDir:     logDir.Text,
-			LogMaxMB:   atoiSafe(maxSize.Text),
-			LogMaxKeep: atoiSafe(maxFiles.Text),
+			BackendURL:        backend.Text,
+			ChatModel:         s.ChatModel,
+			ChatContextTokens: s.ChatContextTokens,
+			LogEnabled:        logsChk.Checked,
+			LogDir:            logDir.Text,
+			LogMaxMB:          atoiSafe(maxSize.Text),
+			LogMaxKeep:        atoiSafe(maxFiles.Text),
 		}
 		if err := writeLLMSettings(ns); err != nil {
 			dialog.ShowError(err, w)

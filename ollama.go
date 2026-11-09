@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/png"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,28 +29,48 @@ var llmBase = defaultBackendURL
 // probeModels returns the model ids the server has loaded, or an error if the
 // server is unreachable. Uses the OpenAI-compatible GET /v1/models.
 func probeModels(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, llmBase+"/models", nil)
+	return probeModelsAt(ctx, llmBase, http.DefaultClient)
+}
+
+func probeModelsAt(ctx context.Context, base string, client *http.Client) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s/models: %s", llmBase, resp.Status)
+		return nil, fmt.Errorf("model listing returned status %d", resp.StatusCode)
 	}
 	var body struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	data, err := readChatBytes(resp.Body, 64<<10)
+	if err != nil {
 		return nil, err
+	}
+	if err := checkChatJSON(data); err != nil {
+		return nil, errors.New("invalid model listing JSON")
+	}
+	if err := checkChatMemberNames(data, reflect.TypeOf(body)); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, err
+	}
+	if len(body.Data) > 256 {
+		return nil, errors.New("model listing exceeded 256 entries")
 	}
 	var names []string
 	for _, m := range body.Data {
+		if len(m.ID) > 200 {
+			return nil, errors.New("model id exceeded 200 bytes")
+		}
 		if m.ID != "" {
 			names = append(names, m.ID)
 		}
@@ -263,14 +285,16 @@ func llmConfigPath() (string, error) {
 	return filepath.Join(dir, "dtx-agent", "llm.txt"), nil
 }
 
-// LLMSettings is the parsed content of llm.txt: the backend URL plus logging knobs.
+// LLMSettings is the parsed backend, explicit chat selection and logging config.
 type LLMSettings struct {
-	BackendURL string
-	LogEnabled bool
-	LogFile    string // legacy: full path to a single log file (no rotation)
-	LogDir     string // "" → caller's default (<config dir>/dtx-agent)
-	LogMaxMB   int    // rotate at this size; 0 → default
-	LogMaxKeep int    // keep this many rotated files; 0 → default
+	BackendURL        string
+	ChatModel         string
+	ChatContextTokens int
+	LogEnabled        bool
+	LogFile           string // legacy: full path to a single log file (no rotation)
+	LogDir            string // "" → caller's default (<config dir>/dtx-agent)
+	LogMaxMB          int    // rotate at this size; 0 → default
+	LogMaxKeep        int    // keep this many rotated files; 0 → default
 }
 
 // parseLLMSettings reads llm.txt. The first bare line (not a comment, not
@@ -291,6 +315,10 @@ func parseLLMSettings(data []byte) LLMSettings {
 			switch strings.TrimSpace(strings.ToLower(k)) {
 			case "backend_url":
 				s.BackendURL = v // clean-key form wins over a bare url line
+			case "chat_model":
+				s.ChatModel = v
+			case "chat_context_tokens":
+				s.ChatContextTokens = atoiSafe(v)
 			case "log":
 				lv := strings.ToLower(v)
 				s.LogEnabled = lv == "on" || lv == "true" || lv == "1"
@@ -362,6 +390,9 @@ func loadLLMSettings() LLMSettings {
 // a user's hand-written comments or free-form edits — the GUI is now the source
 // of truth. Headless users can still hand-edit; parseLLMSettings reads both forms.
 func writeLLMSettings(s LLMSettings) error {
+	if (s.ChatModel != "" || s.ChatContextTokens != 0) && !localChatSettings(s) {
+		return errors.New("chat settings require an exact model, positive context cap and loopback /v1 URL")
+	}
 	path, err := llmConfigPath()
 	if err != nil {
 		return err
@@ -389,11 +420,15 @@ func writeLLMSettings(s LLMSettings) error {
 # Backend URL — Ollama :11434/v1, LM Studio :1234/v1, or any OpenAI-compatible server.
 backend_url=%s
 
+# Local text/tool chat is disabled until an exact installed model and cap are set.
+chat_model=%s
+chat_context_tokens=%d
+
 # ── Logging ─────────────────────────────────────────────────────────────────
 log=%s
 log_dir=%s
 log_max_size_mb=%d
 log_max_files=%d
-`, s.BackendURL, logVal, s.LogDir, maxMB, maxKeep)
+`, s.BackendURL, s.ChatModel, s.ChatContextTokens, logVal, s.LogDir, maxMB, maxKeep)
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

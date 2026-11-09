@@ -169,6 +169,139 @@ Leave `log_dir` empty to keep logs in the configuration folder. The
 [`llm.txt`](llm.txt) in this repository is the default template; edit your
 per-user copy to change the running agent's settings.
 
+## Local tool chat: companion-side support
+
+Tool chat is opt-in. In your per-user `llm.txt`, set `chat_model` to the **exact**
+installed ID from the model server's `/v1/models` response, and set
+`chat_context_tokens` to a positive cap you have verified for that model. For
+example, an installed Ollama `gemma4:latest` can be selected with:
+
+```ini
+backend_url=http://127.0.0.1:11434/v1
+chat_model=gemma4:latest
+chat_context_tokens=131072
+```
+
+Restart after editing. The GUI preserves these two keys when saving settings;
+edit them in the file. Empty model and zero cap disable chat. Missing, invalid,
+or uninstalled selections never pick another model. Chat accepts only loopback
+HTTP(S) `/v1` servers, disables HTTP proxies and rejects redirects. Existing
+vision model matching and substitution stay unchanged.
+
+The companion advertises `llm.chat` only after listing the selected installed
+model and receiving one valid scripted tool call from it. Initial probing runs
+off the WebSocket read loop; connection loss and agent cancellation abort its
+HTTP request and drain background work. A failed probe leaves chat unavailable.
+The only ingress is the existing outbound bearer-paired
+`/compute/ws` connection. No inbound bridge or local tool/shell execution exists.
+The model emits tool calls for the browser to validate and execute.
+
+The assignment contract is `type: "job.assign"`, a separate
+`jobType: "LLM_CHAT_TOOLS"`, a unique `jobId`, RFC 3339 `expiresAt` in the next
+five minutes, and `payload: { model, messages, tools, maxTokens }`. Unknown fields
+and duplicate JSON members are rejected. Typed member names must match their
+JSON spelling exactly. Arbitrary schema property names remain case-sensitive,
+so `value` and `Value` can coexist. Invalid UTF-8 and unmatched UTF-16 surrogate
+escapes are rejected in all JSON keys and strings before decoding; valid pairs
+and literal escaped backslashes are preserved. Text messages use `system`, `user`,
+`assistant` or `tool` roles; historical tool calls/results must form complete
+pairs. Images use the existing vision path. `responseSchema`, streaming, and
+additional provider options are unsupported in this chat contract.
+
+Tools use OpenAI function descriptors with `strict: true`. Parameters must be
+object schemas with `additionalProperties: false` on every object. The supported
+schema subset is `type` (one of object, array, string, number, integer, boolean,
+null), `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`,
+`minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `description`
+and `title`. Child schemas also accept exactly one supported non-null base type
+paired with `"null"`, such as `["integer", "null"]`, in either order.
+Present keyword operands cannot be JSON null, except for `const: null`;
+null entries inside an `enum` array remain valid data.
+
+The UI serializer's nullable wrapper is also supported: an object containing only
+`anyOf`, with exactly two branches: one supported single non-null base schema and
+the literal `{ "type": "null" }`, in either order. The non-null branch retains
+all of its constraints. The null branch accepts the optional-field marker even
+when the base branch has an `enum` or `const`. A base branch that is itself a
+union, a non-literal null branch, additional wrapper siblings, or extra branches
+is rejected. Bounds count the wrapper and base separately toward schema depth.
+
+Root tool parameters remain non-nullable objects. Nullable fields still have to
+be present when listed in `required`. In the type-pair form, `enum` and `const`
+continue to constrain null as well as non-null values.
+
+The companion preserves these null fields for the browser's original-domain
+normalization, validation and execution permissions, including in assistant/tool
+history. The valid UI serializer does not need to change. References, arbitrary
+unions, patterns and general combinators remain unsupported and are refused
+before inference. Returned calls must name an advertised tool and satisfy its
+schema.
+
+Numeric bounds and integer checks use exact decimal arithmetic. Numeric literals
+are limited to 128 bytes, 64 mantissa digits (including zeroes), and exponent magnitude 256;
+unsupported precision/range is refused. Equivalent numeric `enum`/`const`
+values such as `0.1` and `0.10` compare equally. String length bounds count
+decoded Unicode code points: an emoji counts once and `e` plus a combining
+accent counts twice. The browser retains its original domain validation.
+
+| Limit | Bound |
+| --- | --- |
+| Assignment / local request / upstream response | 64 KiB each |
+| Normalized completion | 60 KiB, leaving room for the result envelope |
+| Messages / tools / calls per assistant message | 64 / 20 / 8 |
+| Message content / tool arguments | 16 KiB / 8 KiB |
+| Tool schema depth / properties per object | 8 / 64 |
+| Installed model listing | 64 KiB / 256 IDs / 200 bytes per ID |
+| Explicit context / output cap | 1 to 1,048,576 / 1 to 8,192 tokens |
+| Probe / inference timeout | 180 seconds each; earlier expiry or cancellation wins |
+
+Context admission conservatively counts serialized input bytes as tokens, plus
+1,024 tokens of framing allowance and the requested output cap. A request that
+does not fit is refused rather than truncated. Results use the existing
+`job.result` envelope with `ok`, and either a stable error code or normalized
+OpenAI `model`, single `choices` entry and `usage`. Extra upstream metadata and
+private reasoning fields are omitted. Raw messages, arguments and tokens are
+not logged.
+
+One shared slot handles vision and chat jobs. Cancellation, expiry, unpairing
+and connection loss abort in-flight chat HTTP requests. Accepted chat job IDs
+remain blocked for one hour across reconnects under the same API URL, agent ID
+and pairing token. The process retains at most 4,096 tombstones and refuses new
+jobs when full, rather than evicting unexpired protection. This is process-local
+replay protection; it does not survive agent restart. Backend leases, ownership,
+project scope and durable duplicate-result handling still belong to the backend.
+
+Backend issue #748's chat schema/capability dispatch is a separate dependency.
+This companion support and its synthetic paired-backend tests do **not** prove
+real platform dispatch or an editor inspect/edit/check/save/reopen workflow.
+Geometry still requires the open editor.
+
+### Opt-in live local-model check
+
+The live test uses a temporary test profile and the real selected local model,
+with a synthetic authenticated backend. It makes no hosted calls, downloads no
+models and leaves your normal configuration untouched. It is skipped unless all
+three variables are supplied. On the development Mac, run through the shared
+heavy-check queue (allow cold-start time):
+
+```sh
+export PATH=/Users/diandeskov/.nvm/versions/node/v22.23.2/bin:$PATH
+export GOTOOLCHAIN=go1.26.0 CGO_ENABLED=0
+DTX_LIVE_CHAT_URL=http://127.0.0.1:11434/v1 \
+DTX_LIVE_CHAT_MODEL=gemma4:latest \
+DTX_LIVE_CHAT_CONTEXT_TOKENS=131072 \
+/Users/diandeskov/Documents/GitHub/Deltatronix/dtx-heavy.sh local-chat-live -- \
+  go test -count=1 -v -timeout=6m -run '^TestLivePairedLocalChatTools$' .
+```
+
+This checks production installation/probing and a real model tool call through
+the job handler. It sends the returned assistant call and a synthetic tool result
+with that exact call ID back to the same selected model, checks the follow-up
+completion acknowledges the synthetic receipt, then cancels a third accepted job.
+Deterministic
+HTTP fixtures separately check aborting an in-flight model request. A skipped
+live test is not a successful live-model proof.
+
 ## Troubleshooting
 
 | Problem | What to check |

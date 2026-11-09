@@ -5,6 +5,11 @@
 # Backend URL — Ollama :11434/v1, LM Studio :1234/v1, or any OpenAI-compatible server.
 backend_url=http://localhost:11434/v1
 
+# Tool chat is opt-in. Set the exact installed model id and its explicit cap.
+# Empty model / zero cap disables llm.chat; no model is selected automatically.
+chat_model=
+chat_context_tokens=0
+
 # ── Logging ─────────────────────────────────────────────────────────────────
 # log:              on (default) | off
 # log_dir:          folder for dtx-agent.log (default: the config folder)
