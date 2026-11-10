@@ -1,0 +1,349 @@
+{
+  "purpose": "Protocol metadata fixture only; opaque geometry result hashes are placeholders, not a physical clearance proof.",
+  "proofPreimage": "{\"assets\":[{\"hash\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"size\":1200}],\"boardCaptures\":[{\"boardId\":\"board-source\",\"capture\":{\"assetId\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"revisionId\":null,\"sourceHash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"sourceSnapshotId\":\"board-snapshot\"},\"designId\":\"design-source\",\"rawSize\":1200,\"referenceId\":\"pcb-ref\"}],\"configurationId\":null,\"documentHash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"documentId\":\"case-shape\",\"fitLimits\":{\"maxBoards\":8,\"maxChecks\":256,\"maxComponents\":256,\"maxKeepouts\":256,\"maxModels\":256,\"maxPrimitives\":2048},\"targetKind\":\"shape\",\"version\":0}",
+  "proofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+  "capability": "shape.pcb-fit.v1",
+  "assignment": {
+    "type": "job.assign",
+    "jobType": "SHAPE_NATIVE",
+    "jobId": "native-job",
+    "payload": {
+      "contractVersion": 3,
+      "targetKind": "shape",
+      "requestId": "11111111-1111-4111-8111-111111111111",
+      "documentId": "case-shape",
+      "version": 0,
+      "snapshotId": "snapshot-root",
+      "document": {
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 700,
+        "url": "https://api.invalid/compute/shape-jobs/native-job/document"
+      },
+      "configurationId": null,
+      "operation": {
+        "kind": "pcb-fit"
+      },
+      "limits": {
+        "memoryBytes": 1073741824,
+        "cpuQuota": 1,
+        "pids": 64,
+        "startupMs": 30000,
+        "wallMs": 60000,
+        "cancelGraceMs": 250,
+        "maxDocumentBytes": 4194304,
+        "maxAssetBytes": 33554432,
+        "maxInputBytes": 67108864,
+        "maxFeatures": 256,
+        "maxWorkUnits": 250000,
+        "maxBodies": 256,
+        "maxTriangles": 250000,
+        "maxOutputBytes": 8388608,
+        "maxStdoutBytes": 12582912,
+        "maxStderrBytes": 65536
+      },
+      "fitLimits": {
+        "maxBoards": 8,
+        "maxModels": 256,
+        "maxComponents": 256,
+        "maxPrimitives": 2048,
+        "maxKeepouts": 256,
+        "maxChecks": 256
+      },
+      "boardCaptures": [
+        {
+          "referenceId": "pcb-ref",
+          "designId": "design-source",
+          "boardId": "board-source",
+          "capture": {
+            "assetId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "sourceSnapshotId": "board-snapshot",
+            "sourceHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "revisionId": null
+          },
+          "rawSize": 1200
+        }
+      ],
+      "assets": [
+        {
+          "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "size": 1200,
+          "url": "https://api.invalid/compute/shape-jobs/native-job/captures/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "proofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+      "lease": {
+        "id": "lease-id",
+        "expiresAt": 1900000010000
+      },
+      "runtime": {
+        "artifactId": "shape-native-v3-example",
+        "manifestUrl": "/compute/shape-runtime/shape-native-v3-example/manifest"
+      }
+    }
+  },
+  "child": {
+    "contractVersion": 3,
+    "targetKind": "shape",
+    "identity": {
+      "requestId": "11111111-1111-4111-8111-111111111111",
+      "documentId": "case-shape",
+      "version": 0
+    },
+    "documentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "configurationId": null,
+    "operation": {
+      "kind": "pcb-fit"
+    },
+    "limits": {
+      "memoryBytes": 1073741824,
+      "cpuQuota": 1,
+      "pids": 64,
+      "startupMs": 30000,
+      "wallMs": 60000,
+      "cancelGraceMs": 250,
+      "maxDocumentBytes": 4194304,
+      "maxAssetBytes": 33554432,
+      "maxInputBytes": 67108864,
+      "maxFeatures": 256,
+      "maxWorkUnits": 250000,
+      "maxBodies": 256,
+      "maxTriangles": 250000,
+      "maxOutputBytes": 8388608,
+      "maxStdoutBytes": 12582912,
+      "maxStderrBytes": 65536
+    },
+    "fitLimits": {
+      "maxBoards": 8,
+      "maxModels": 256,
+      "maxComponents": 256,
+      "maxPrimitives": 2048,
+      "maxKeepouts": 256,
+      "maxChecks": 256
+    },
+    "boardCaptures": [
+      {
+        "referenceId": "pcb-ref",
+        "designId": "design-source",
+        "boardId": "board-source",
+        "capture": {
+          "assetId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "sourceSnapshotId": "board-snapshot",
+          "sourceHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "revisionId": null
+        },
+        "rawSize": 1200
+      }
+    ],
+    "assets": [
+      {
+        "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 1200
+      }
+    ],
+    "proofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c"
+  },
+  "childResult": {
+    "type": "result",
+    "contractVersion": 3,
+    "requestId": "11111111-1111-4111-8111-111111111111",
+    "result": {
+      "bodyCount": 2,
+      "triangles": 24,
+      "work": 100,
+      "microstamp": "example-kernel",
+      "states": {},
+      "file": null,
+      "resultHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "resultSize": 2000,
+      "fit": {
+        "decision": "clear",
+        "sourceProofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+        "requirementsHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "findingsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "checkCount": 1,
+        "interferenceCount": 0,
+        "indeterminateCount": 0,
+        "issues": [],
+        "moreIssues": 0
+      }
+    }
+  },
+  "cancel": {
+    "type": "cancel",
+    "contractVersion": 3,
+    "requestId": "11111111-1111-4111-8111-111111111111"
+  },
+  "controlsSchemaVersion": 1,
+  "phaseVocabulary": [
+    "booting",
+    "running",
+    "feature:<nonnegative integer>",
+    "exporting"
+  ],
+  "issueCodes": [
+    "interference",
+    "unknown-model",
+    "keepout-unavailable",
+    "selection-unresolved",
+    "checks-disabled",
+    "no-checks",
+    "measurement-failed",
+    "feature-failed",
+    "opening-missed"
+  ],
+  "receiptStatus": "checked",
+  "summary": {
+    "bodyCount": 2,
+    "triangles": 24,
+    "work": 100,
+    "microstamp": "example-kernel",
+    "states": {},
+    "file": null,
+    "resultHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resultSize": 2000,
+    "fit": {
+      "decision": "clear",
+      "sourceProofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+      "requirementsHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "findingsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "checkCount": 1,
+      "interferenceCount": 0,
+      "indeterminateCount": 0,
+      "issues": [],
+      "moreIssues": 0
+    }
+  },
+  "result": {
+    "type": "job.result",
+    "jobId": "native-job",
+    "leaseId": "lease-id",
+    "ok": true,
+    "result": {
+      "schemaVersion": 1,
+      "summary": {
+        "bodyCount": 2,
+        "triangles": 24,
+        "work": 100,
+        "microstamp": "example-kernel",
+        "states": {},
+        "file": null,
+        "resultHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSize": 2000,
+        "fit": {
+          "decision": "clear",
+          "sourceProofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+          "requirementsHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "findingsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "checkCount": 1,
+          "interferenceCount": 0,
+          "indeterminateCount": 0,
+          "issues": [],
+          "moreIssues": 0
+        }
+      },
+      "receipt": {
+        "status": "completed",
+        "artifactId": "shape-native-v3-example",
+        "image": "sha256:78bc820a7a6148e8c48731eca18dbb9b6b2c05ac4a52138479be565f2831682d",
+        "container": {
+          "oom": false,
+          "exit": 0,
+          "memory": 1073741824,
+          "swap": 1073741824,
+          "nano": 1000000000,
+          "pids": 64,
+          "readonly": true,
+          "network": "none",
+          "user": "65534:65534",
+          "logDriver": "none"
+        },
+        "cleanupVerified": true,
+        "hardKilled": false,
+        "cooperativeCancelled": false,
+        "stdoutBytes": 1000,
+        "stderrBytes": 0
+      },
+      "output": null
+    }
+  },
+  "sortRules": {
+    "boardCaptures": "referenceId ASCII ascending; duplicate referenceId refused",
+    "assets": "hash ASCII ascending; duplicate hash refused",
+    "objects": "recursive ASCII key ordering; arrays keep pre-sorted order",
+    "preimageFields": [
+      "targetKind",
+      "documentId",
+      "version",
+      "documentHash",
+      "configurationId",
+      "fitLimits",
+      "boardCaptures",
+      "assets"
+    ]
+  },
+  "issueFieldLimit": 128,
+  "maxSummaryIssues": 64,
+  "summaryIssueSchema": {
+    "required": [
+      "featureId",
+      "referenceId",
+      "refdes",
+      "code"
+    ],
+    "additionalProperties": false,
+    "featureId": "null or nonempty UTF-8 string <=128 bytes",
+    "referenceId": "null or nonempty UTF-8 string <=128 bytes",
+    "refdes": "null or nonempty UTF-8 string <=128 bytes",
+    "code": [
+      "interference",
+      "unknown-model",
+      "keepout-unavailable",
+      "selection-unresolved",
+      "checks-disabled",
+      "no-checks",
+      "measurement-failed",
+      "feature-failed",
+      "opening-missed"
+    ]
+  },
+  "configurationIdRule": "null or existing safe ASCII ID [a-zA-Z0-9_-]{1,128}; V3 requires named definition in exact saved document; V1 fallback unchanged",
+  "versionRule": "nonnegative safe integer, legitimate copied saved document version 0 supported",
+  "nonClearSummaryExamples": [
+    {
+      "decision": "interference",
+      "sourceProofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+      "requirementsHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "findingsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "checkCount": 1,
+      "interferenceCount": 1,
+      "indeterminateCount": 0,
+      "issues": [
+        {
+          "featureId": "cut-feature",
+          "referenceId": "pcb-ref",
+          "refdes": "J1",
+          "code": "interference"
+        }
+      ],
+      "moreIssues": 0
+    },
+    {
+      "decision": "indeterminate",
+      "sourceProofHash": "aa2830a3b4e499a53b576910074637ca0028e1dc5310260ce22c8bc43ecf702c",
+      "requirementsHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "findingsHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "checkCount": 0,
+      "interferenceCount": 0,
+      "indeterminateCount": 1,
+      "issues": [
+        {
+          "featureId": null,
+          "referenceId": null,
+          "refdes": null,
+          "code": "no-checks"
+        }
+      ],
+      "moreIssues": 0
+    }
+  ]
+}

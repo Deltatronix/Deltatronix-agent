@@ -25,6 +25,9 @@ type nativePayload struct {
 	SourceDocuments []nativeSourceDocument `json:"sourceDocuments"`
 	AssemblyLimits  map[string]float64     `json:"assemblyLimits"`
 	ClosureHash     string                 `json:"closureHash"`
+	BoardCaptures   []nativeBoardCapture   `json:"boardCaptures"`
+	FitLimits       map[string]float64     `json:"fitLimits"`
+	ProofHash       string                 `json:"proofHash"`
 	RequestID       string                 `json:"requestId"`
 	DocumentID      string                 `json:"documentId"`
 	Version         int                    `json:"version"`
@@ -49,7 +52,7 @@ var nativeArtifactPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 var nativePolicy = map[string]float64{"memoryBytes": 1 << 30, "cpuQuota": 1, "pids": 64, "startupMs": 30000, "wallMs": 60000, "cancelGraceMs": 250, "maxDocumentBytes": 4 << 20, "maxAssetBytes": 32 << 20, "maxInputBytes": 64 << 20, "maxFeatures": 256, "maxWorkUnits": 250000, "maxBodies": 256, "maxTriangles": 250000, "maxOutputBytes": 8 << 20, "maxStdoutBytes": 12 << 20, "maxStderrBytes": 64 << 10}
 
 func validateNativePayload(p *nativePayload) error {
-	if p == nil || (p.ContractVersion != 1 && p.ContractVersion != 2) || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
+	if p == nil || (p.ContractVersion != 1 && p.ContractVersion != 2 && p.ContractVersion != 3) || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
 		return errors.New("invalid native assignment identity")
 	}
 	if len(p.Limits) != len(nativePolicy) {
@@ -78,6 +81,12 @@ func validateNativePayload(p *nativePayload) error {
 	}
 	if total > 64<<20 {
 		return errors.New("native input exceeds limit")
+	}
+	if p.ContractVersion == 3 {
+		return validateNativePCB(p)
+	}
+	if p.BoardCaptures != nil || p.FitLimits != nil || p.ProofHash != "" {
+		return errors.New("PCB fields require native job version3")
 	}
 	if p.ContractVersion == 2 {
 		return validateNativeAssembly(p, total)
@@ -204,6 +213,12 @@ func nativeChildManifest(p *nativePayload) map[string]any {
 		manifest["assemblyLimits"] = p.AssemblyLimits
 		manifest["sourceDocuments"] = sources
 		manifest["closureHash"] = p.ClosureHash
+	}
+	if p.ContractVersion == 3 {
+		manifest["targetKind"] = p.TargetKind
+		manifest["fitLimits"] = p.FitLimits
+		manifest["boardCaptures"] = p.BoardCaptures
+		manifest["proofHash"] = p.ProofHash
 	}
 	return manifest
 }
@@ -465,6 +480,11 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 	}
 	if p.ContractVersion == 2 {
 		if err := validateNativeAssemblySummary(p, result); err != nil {
+			return nil, err
+		}
+	}
+	if p.ContractVersion == 3 {
+		if err := validateNativePCBSummary(p, result); err != nil {
 			return nil, err
 		}
 	}
