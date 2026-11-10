@@ -311,7 +311,7 @@ func (a *agent) probeAndAdvertise() {
 		caps = []string{"llm.vision"}
 	}
 	if nativeAvailable {
-		caps = append(caps, "shape.native.v1")
+		caps = append(caps, "shape.native.v1", "shape.assembly.v1")
 	}
 	log.Printf("advertising capabilities: %v", caps)
 	a.send(map[string]any{"type": "capabilities", "capabilities": caps})

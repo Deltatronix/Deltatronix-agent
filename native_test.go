@@ -98,7 +98,7 @@ func TestNativeOutputRejectsWrongEvidenceAndChangedBytes(t *testing.T) {
 	dir := t.TempDir()
 	data := []byte(`{"bodies":[]}`)
 	os.WriteFile(filepath.Join(dir, "result.json"), data, 0644)
-	p := &nativePayload{RequestID: "request"}
+	p := &nativePayload{ContractVersion: 1, RequestID: "request"}
 	applied := map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}
 	lines := func() []byte {
 		a, _ := json.Marshal(map[string]any{"contractVersion": 1, "requestId": "request", "type": "limits", "applied": applied})
@@ -149,7 +149,7 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(time.Second, cancel)
 	start := time.Now()
-	_, _, cancelledReceipt, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request")
+	_, _, cancelledReceipt, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request", 1)
 	if err == nil {
 		t.Fatal("blocking child succeeded")
 	}
@@ -166,7 +166,7 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nwhile [ ! -f /input/controls.json ]; do sleep 0.01; done\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request")
+	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	os.MkdirAll(output, 0777)
 	os.Chmod(output, 0777)
 	os.WriteFile(filepath.Join(input, "document.json"), data, 0644)
-	p := &nativePayload{RequestID: "companion-real-deno-" + operation}
+	p := &nativePayload{ContractVersion: 1, RequestID: "companion-real-deno-" + operation}
 	op := map[string]any{"kind": "regenerate"}
 	if operation != "regenerate" {
 		op = map[string]any{"kind": "export", "format": operation, "qualityScale": 1}
@@ -226,7 +226,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": "companion-test", "version": 1}, "documentHash": hashNative(data), "configurationId": nil, "operation": op, "limits": nativePolicy, "assets": []any{}}
 	wire, _ := json.Marshal(job)
 	os.WriteFile(filepath.Join(input, "job.json"), wire, 0644)
-	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno-"+operation, runtimeDir, input, output, p.RequestID)
+	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno-"+operation, runtimeDir, input, output, p.RequestID, 1)
 	if err != nil {
 		t.Fatalf("Deno run: %v stdout=%s stderr=%s", err, stdout, stderr)
 	}
@@ -381,7 +381,7 @@ func TestNativeStartupAndWorkDeadlines(t *testing.T) {
 }
 func TestNativeStreamingRejectsResultBeforeRunningAndLateFrames(t *testing.T) {
 	for _, frames := range [][]string{{`{"type":"result"}`}, {`{"type":"limits"}`, `{"type":"limits"}`}, {`{"type":"limits"}`, `{"type":"phase","phase":"booting"}`, `{"type":"phase","phase":"running"}`, `{"type":"result"}`, `{"type":"phase","phase":"exporting"}`}} {
-		m := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+		m := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: make(chan struct{}, 1)}
 		var err error
 		for _, frame := range frames {
 			var f map[string]any
@@ -429,7 +429,7 @@ func TestNativeMeasuredCgroupControls(t *testing.T) {
 
 func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
 	running := make(chan struct{}, 1)
-	m := &nativeOutputMonitor{requestID: "request", running: running}
+	m := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: running}
 	frames := []map[string]any{{"type": "limits", "applied": map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}}, {"type": "phase", "phase": "booting"}, {"type": "phase", "phase": "running"}, {"type": "result"}}
 	for _, frame := range frames {
 		frame["contractVersion"] = 1
@@ -444,7 +444,7 @@ func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
 	default:
 		t.Fatal("work clock never started")
 	}
-	bad := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+	bad := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: make(chan struct{}, 1)}
 	data := []byte(`{"contractVersion":1,"requestId":"request","type":"limits","applied":{"runtime":"node"}}` + "\n")
 	if bad.write(data) == nil {
 		t.Fatal("unmeasured/wrong runtime starts work")
@@ -662,4 +662,34 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 		t.Fatalf("process stop left container: %s %v", out, err)
 	}
 	t.Logf("actual paired process interrupted and container removed in %s", time.Since(start))
+}
+
+func TestNativeAssemblyStreamingKeepsJobVersionsSeparate(t *testing.T) {
+	running := make(chan struct{}, 1)
+	monitor := &nativeOutputMonitor{contractVersion: 2, requestID: "assembly-request", running: running}
+	applied := map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}
+	frames := []map[string]any{{"type": "limits", "applied": applied}, {"type": "phase", "phase": "booting"}, {"type": "phase", "phase": "running"}, {"type": "result"}}
+	for _, frame := range frames {
+		frame["contractVersion"] = 2
+		frame["requestId"] = "assembly-request"
+		data, _ := json.Marshal(frame)
+		if err := monitor.write(append(data, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-running:
+	default:
+		t.Fatal("assembly never reached running")
+	}
+	old := &nativeOutputMonitor{contractVersion: 1, requestID: "assembly-request", running: make(chan struct{}, 1)}
+	data, _ := json.Marshal(map[string]any{"contractVersion": 2, "requestId": "assembly-request", "type": "limits", "applied": applied})
+	if old.write(append(data, '\n')) == nil {
+		t.Fatal("v1 monitor accepted v2 child")
+	}
+	newJob := &nativeOutputMonitor{contractVersion: 2, requestID: "assembly-request", running: make(chan struct{}, 1)}
+	data, _ = json.Marshal(map[string]any{"contractVersion": 1, "requestId": "assembly-request", "type": "limits", "applied": applied})
+	if newJob.write(append(data, '\n')) == nil {
+		t.Fatal("v2 monitor accepted v1 child")
+	}
 }

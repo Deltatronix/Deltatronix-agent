@@ -20,16 +20,20 @@ type nativeFile struct {
 	URL  string `json:"url"`
 }
 type nativePayload struct {
-	ContractVersion int                `json:"contractVersion"`
-	RequestID       string             `json:"requestId"`
-	DocumentID      string             `json:"documentId"`
-	Version         int                `json:"version"`
-	SnapshotID      string             `json:"snapshotId"`
-	Document        nativeFile         `json:"document"`
-	Assets          []nativeFile       `json:"assets"`
-	ConfigurationID *string            `json:"configurationId"`
-	Operation       json.RawMessage    `json:"operation"`
-	Limits          map[string]float64 `json:"limits"`
+	ContractVersion int                    `json:"contractVersion"`
+	TargetKind      string                 `json:"targetKind"`
+	SourceDocuments []nativeSourceDocument `json:"sourceDocuments"`
+	AssemblyLimits  map[string]float64     `json:"assemblyLimits"`
+	ClosureHash     string                 `json:"closureHash"`
+	RequestID       string                 `json:"requestId"`
+	DocumentID      string                 `json:"documentId"`
+	Version         int                    `json:"version"`
+	SnapshotID      string                 `json:"snapshotId"`
+	Document        nativeFile             `json:"document"`
+	Assets          []nativeFile           `json:"assets"`
+	ConfigurationID *string                `json:"configurationId"`
+	Operation       json.RawMessage        `json:"operation"`
+	Limits          map[string]float64     `json:"limits"`
 	Lease           struct {
 		ID        string `json:"id"`
 		ExpiresAt int64  `json:"expiresAt"`
@@ -45,7 +49,7 @@ var nativeArtifactPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 var nativePolicy = map[string]float64{"memoryBytes": 1 << 30, "cpuQuota": 1, "pids": 64, "startupMs": 30000, "wallMs": 60000, "cancelGraceMs": 250, "maxDocumentBytes": 4 << 20, "maxAssetBytes": 32 << 20, "maxInputBytes": 64 << 20, "maxFeatures": 256, "maxWorkUnits": 250000, "maxBodies": 256, "maxTriangles": 250000, "maxOutputBytes": 8 << 20, "maxStdoutBytes": 12 << 20, "maxStderrBytes": 64 << 10}
 
 func validateNativePayload(p *nativePayload) error {
-	if p == nil || p.ContractVersion != 1 || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
+	if p == nil || (p.ContractVersion != 1 && p.ContractVersion != 2) || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
 		return errors.New("invalid native assignment identity")
 	}
 	if len(p.Limits) != len(nativePolicy) {
@@ -74,6 +78,12 @@ func validateNativePayload(p *nativePayload) error {
 	}
 	if total > 64<<20 {
 		return errors.New("native input exceeds limit")
+	}
+	if p.ContractVersion == 2 {
+		return validateNativeAssembly(p, total)
+	}
+	if p.TargetKind != "" || p.SourceDocuments != nil || p.AssemblyLimits != nil || p.ClosureHash != "" {
+		return errors.New("assembly fields require native job version2")
 	}
 	return nil
 }
@@ -179,6 +189,25 @@ func nativeJSONRequest(ctx context.Context, cfg Config, path, lease string, body
 	return json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(out)
 }
 
+func nativeChildManifest(p *nativePayload) map[string]any {
+	assets := make([]map[string]any, 0, len(p.Assets))
+	for _, file := range p.Assets {
+		assets = append(assets, map[string]any{"hash": file.Hash, "size": file.Size})
+	}
+	manifest := map[string]any{"contractVersion": p.ContractVersion, "identity": map[string]any{"requestId": p.RequestID, "documentId": p.DocumentID, "version": p.Version}, "documentHash": p.Document.Hash, "configurationId": p.ConfigurationID, "operation": p.Operation, "limits": p.Limits, "assets": assets}
+	if p.ContractVersion == 2 {
+		sources := make([]map[string]any, 0, len(p.SourceDocuments))
+		for _, source := range p.SourceDocuments {
+			sources = append(sources, nativeSourceMetadata(source))
+		}
+		manifest["targetKind"] = p.TargetKind
+		manifest["assemblyLimits"] = p.AssemblyLimits
+		manifest["sourceDocuments"] = sources
+		manifest["closureHash"] = p.ClosureHash
+	}
+	return manifest
+}
+
 func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	a.mu.Lock()
 	if a.busy {
@@ -255,7 +284,7 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	input := filepath.Join(dir, "input")
 	output := filepath.Join(dir, "output")
 	runtimeDir := filepath.Join(dir, "runtime")
-	for _, path := range []string{input, output, runtimeDir, filepath.Join(input, "assets")} {
+	for _, path := range []string{input, output, runtimeDir, filepath.Join(input, "assets"), filepath.Join(input, "sources")} {
 		if err := os.MkdirAll(path, 0755); err != nil {
 			fail(err)
 			return
@@ -280,15 +309,17 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 		fail(err)
 		return
 	}
-	assets := []map[string]any{}
-	for _, f := range p.Assets {
-		if err := fetchNativeInput(startupCtx, f, filepath.Join(input, "assets", f.Hash)); err != nil {
+	for _, file := range p.Assets {
+		if err := fetchNativeInput(startupCtx, file, filepath.Join(input, "assets", file.Hash)); err != nil {
 			fail(err)
 			return
 		}
-		assets = append(assets, map[string]any{"hash": f.Hash, "size": f.Size})
 	}
-	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": p.DocumentID, "version": p.Version}, "documentHash": p.Document.Hash, "configurationId": p.ConfigurationID, "operation": p.Operation, "limits": p.Limits, "assets": assets}
+	if err := stageNativeSources(startupCtx, p, input); err != nil {
+		fail(err)
+		return
+	}
+	job := nativeChildManifest(p)
 	data, _ := json.Marshal(job)
 	if err := os.WriteFile(filepath.Join(input, "job.json"), data, 0644); err != nil {
 		fail(err)
@@ -299,7 +330,7 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 		return
 	}
 	startupCancel()
-	stdout, stderr, receipt, err := runNativeContainer(ctx, "dtx-shape-"+hashNative([]byte(a.cfg.AgentID))[:12]+"-"+hashNative([]byte(jobID))[:12], runtimeDir, input, output, p.RequestID)
+	stdout, stderr, receipt, err := runNativeContainer(ctx, "dtx-shape-"+hashNative([]byte(a.cfg.AgentID))[:12]+"-"+hashNative([]byte(jobID))[:12], runtimeDir, input, output, p.RequestID, p.ContractVersion)
 	cleanupVerified = receipt != nil && receipt["cleanupVerified"] == true
 	if err != nil {
 		fail(err)
@@ -395,7 +426,7 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, err
 	}
-	if envelope.ContractVersion != 1 || envelope.RequestID != p.RequestID || envelope.Result == nil {
+	if envelope.ContractVersion != p.ContractVersion || envelope.RequestID != p.RequestID || envelope.Result == nil {
 		return nil, errors.New("native result identity mismatch")
 	}
 	var evidence map[string]any
@@ -412,7 +443,7 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 		if err := json.Unmarshal(line, &frame); err != nil {
 			return nil, err
 		}
-		if frame.ContractVersion != 1 || frame.RequestID != p.RequestID {
+		if frame.ContractVersion != p.ContractVersion || frame.RequestID != p.RequestID {
 			return nil, errors.New("native frame identity mismatch")
 		}
 		if frame.Type == "limits" {
@@ -428,9 +459,13 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 
 	result := envelope.Result
 	for field, max := range map[string]float64{"bodyCount": 256, "triangles": 250000, "work": 250000} {
-		value, ok := result[field].(float64)
-		if !ok || value < 0 || value > max || value != float64(int64(value)) {
+		if !nativeSummaryCount(result[field], max) {
 			return nil, fmt.Errorf("invalid native summary %s", field)
+		}
+	}
+	if p.ContractVersion == 2 {
+		if err := validateNativeAssemblySummary(p, result); err != nil {
+			return nil, err
 		}
 	}
 	states, ok := result["states"].(map[string]any)
@@ -532,4 +567,9 @@ func nativeResultFrame(jobID string, p *nativePayload, summary, receipt map[stri
 		return nil, errors.New("native result envelope exceeds limit")
 	}
 	return frame, nil
+}
+
+func nativeSummaryCount(value any, max float64) bool {
+	number, ok := value.(float64)
+	return ok && number >= 0 && number <= max && number == float64(int64(number))
 }
