@@ -157,7 +157,8 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	if out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name=dtx-shape-test-blocking").Output(); err != nil || len(bytes.TrimSpace(out)) != 0 {
 		t.Fatalf("orphan container: %s %v", out, err)
 	}
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	os.Remove(filepath.Join(input, "controls.json"))
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nwhile [ ! -f /input/controls.json ]; do sleep 0.01; done\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request")
@@ -361,5 +362,41 @@ func TestNativeSuccessReceiptNamesAssignedArtifact(t *testing.T) {
 	receipt := result["receipt"].(map[string]any)
 	if receipt["artifactId"] != p.Runtime.ArtifactID || frame["leaseId"] != "lease" {
 		t.Fatal("runtime/lease identity lost")
+	}
+}
+
+func TestNativeMeasuredCgroupControls(t *testing.T) {
+	controls, err := parseNativeCgroupControls([]byte("1073741824\n0\n64\n100000 100000\n"), "request")
+	if err != nil || controls["requestId"] != "request" || controls["contractVersion"] != 1 {
+		t.Fatalf("valid evidence rejected: %v", err)
+	}
+	for _, data := range []string{"max 0 64 100000 100000", "1073741824 1 64 100000 100000", "1073741824 0 128 100000 100000", "1073741824 0 64 200000 100000"} {
+		if _, err := parseNativeCgroupControls([]byte(data), "request"); err == nil {
+			t.Fatalf("bad controls accepted: %s", data)
+		}
+	}
+}
+
+func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
+	running := make(chan struct{}, 1)
+	m := &nativeOutputMonitor{requestID: "request", running: running}
+	frames := []map[string]any{{"type": "limits", "applied": map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}}, {"type": "phase", "phase": "booting"}, {"type": "phase", "phase": "running"}, {"type": "result"}}
+	for _, frame := range frames {
+		frame["contractVersion"] = 1
+		frame["requestId"] = "request"
+		data, _ := json.Marshal(frame)
+		if err := m.write(append(data, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-running:
+	default:
+		t.Fatal("work clock never started")
+	}
+	bad := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+	data := []byte(`{"contractVersion":1,"requestId":"request","type":"limits","applied":{"runtime":"node"}}` + "\n")
+	if bad.write(data) == nil {
+		t.Fatal("unmeasured/wrong runtime starts work")
 	}
 }

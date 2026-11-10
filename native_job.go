@@ -397,9 +397,10 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 			evidence = frame.Applied
 		}
 	}
-	if evidence == nil || evidence["memoryBytes"] != float64(1<<30) || evidence["swapBytes"] != float64(0) || evidence["pids"] != float64(64) || evidence["cpuQuota"] != float64(1) || evidence["runtime"] != "deno" || evidence["runtimeVersion"] != "2.9.8" {
+	if !nativeAppliedValid(evidence) {
 		return nil, errors.New("native applied limits mismatch")
 	}
+
 	result := envelope.Result
 	for field, max := range map[string]float64{"bodyCount": 256, "triangles": 250000, "work": 250000} {
 		value, ok := result[field].(float64)

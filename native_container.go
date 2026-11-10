@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -123,6 +125,17 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	controlsCtx, controlsCancel := context.WithDeadline(work, startupDeadline)
+	defer controlsCancel()
+	controlsDone := make(chan error, 1)
+	go func() {
+		controlsErr := publishNativeControls(controlsCtx, name, inputDir, requestID)
+		controlsDone <- controlsErr
+		if controlsErr != nil {
+			cancel()
+		}
+	}()
+
 	exited, waitErr := waitNativeExecution(work, done, running, time.Until(startupDeadline), 60*time.Second)
 	err = waitErr
 	if !exited {
@@ -139,6 +152,11 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 		}
 	}
 
+	controlsCancel()
+	controlsErr := <-controlsDone
+	if controlsErr != nil && err == nil {
+		err = controlsErr
+	}
 	_ = stdin.Close()
 	if err == nil && len(monitor.pending) > 0 {
 		err = errors.New("incomplete native JSONL frame")
@@ -303,10 +321,11 @@ func (m *nativeOutputMonitor) write(p []byte) error {
 		line := m.pending[:end]
 		m.pending = m.pending[end+1:]
 		var f struct {
-			ContractVersion int    `json:"contractVersion"`
-			RequestID       string `json:"requestId"`
-			Type            string `json:"type"`
-			Phase           string `json:"phase"`
+			ContractVersion int            `json:"contractVersion"`
+			RequestID       string         `json:"requestId"`
+			Type            string         `json:"type"`
+			Phase           string         `json:"phase"`
+			Applied         map[string]any `json:"applied"`
 		}
 		if err := json.Unmarshal(line, &f); err != nil {
 			return errors.New("invalid native JSONL")
@@ -316,6 +335,9 @@ func (m *nativeOutputMonitor) write(p []byte) error {
 		}
 		switch f.Type {
 		case "limits":
+			if !nativeAppliedValid(f.Applied) {
+				return errors.New("native applied limits mismatch")
+			}
 			if m.limits || m.booting {
 				return errors.New("duplicate native limits")
 			}
@@ -357,4 +379,82 @@ func (m *nativeOutputMonitor) write(p []byte) error {
 			return errors.New("unknown native frame")
 		}
 	}
+}
+
+// Deno deliberately cannot open protected /sys paths. The paired parent reads
+// only these fixed cgroup files and publishes measured controls through RO input.
+func publishNativeControls(ctx context.Context, name, inputDir, requestID string) error {
+	for {
+		out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", `{{.State.Running}} {{index .Config.Labels "io.deltatronix.shape-owner"}}`, name).Output()
+		if err != nil {
+			return fmt.Errorf("inspect native control owner: %w", err)
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) != 2 || fields[1] != nativeContainerOwner(name) {
+			return errors.New("native control owner mismatch")
+		}
+		if fields[0] == "true" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readCancel()
+	cmd := exec.CommandContext(readCtx, "docker", "exec", name, "/bin/cat", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.swap.max", "/sys/fs/cgroup/pids.max", "/sys/fs/cgroup/cpu.max")
+	out := &boundedNativeBuffer{max: 4096, overflow: readCancel}
+	stderr := &boundedNativeBuffer{max: 4096, overflow: readCancel}
+	cmd.Stdout = out
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("read native cgroup controls: %w", err)
+	}
+	controls, err := parseNativeCgroupControls(out.Bytes(), requestID)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(controls)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(inputDir, ".controls-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(data)
+	chmodErr := file.Chmod(0644)
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), filepath.Join(inputDir, "controls.json"))
+}
+func parseNativeCgroupControls(data []byte, requestID string) (map[string]any, error) {
+	fields := strings.Fields(string(data))
+	if len(fields) != 5 {
+		return nil, errors.New("invalid native cgroup evidence")
+	}
+	values := make([]int64, 5)
+	for i, field := range fields {
+		v, err := strconv.ParseInt(field, 10, 64)
+		if err != nil {
+			return nil, errors.New("unbounded native cgroup control")
+		}
+		values[i] = v
+	}
+	if values[0] != 1<<30 || values[1] != 0 || values[2] != 64 || values[3] <= 0 || values[4] <= 0 || math.Abs(float64(values[3])/float64(values[4])-1) > 1e-6 {
+		return nil, errors.New("native cgroup measurements differ from server policy")
+	}
+	return map[string]any{"contractVersion": 1, "requestId": requestID, "memoryBytes": values[0], "swapBytes": values[1], "pids": values[2], "cpuQuota": float64(values[3]) / float64(values[4])}, nil
+}
+
+func nativeAppliedValid(evidence map[string]any) bool {
+	return evidence != nil && evidence["memoryBytes"] == float64(1<<30) && evidence["swapBytes"] == float64(0) && evidence["pids"] == float64(64) && evidence["cpuQuota"] == float64(1) && evidence["runtime"] == "deno" && evidence["runtimeVersion"] == "2.9.8"
 }
