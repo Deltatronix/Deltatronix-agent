@@ -486,12 +486,13 @@ const (
 )
 
 type nativePairedFixture struct {
-	Payload          nativePayload
-	Files            map[string][]byte
-	ExpectedFit      map[string]any
-	ExpectedAssembly map[string]any
-	ExpectedBomHash  string
-	ExpectedError    string
+	Payload           nativePayload
+	Files             map[string][]byte
+	ExpectedBodyCount *float64
+	ExpectedFit       map[string]any
+	ExpectedAssembly  map[string]any
+	ExpectedBomHash   string
+	ExpectedError     string
 }
 
 func loadPairedPartFixture(t *testing.T) nativePairedFixture {
@@ -736,6 +737,9 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 					summary, ok := result["summary"].(map[string]any)
 					if !ok {
 						t.Fatal("PCB summary missing")
+					}
+					if fixture.ExpectedBodyCount != nil && summary["bodyCount"] != *fixture.ExpectedBodyCount {
+						t.Fatalf("PCB body count differs from independent fixture: got %v want %v", summary["bodyCount"], *fixture.ExpectedBodyCount)
 					}
 					fit, ok := summary["fit"].(map[string]any)
 					if !ok || fit["sourceProofHash"] != fixture.Payload.ProofHash || result["output"] != nil {

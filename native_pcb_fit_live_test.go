@@ -72,16 +72,27 @@ func loadPairedPCBFixture(t *testing.T) nativePairedFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var expected struct {
-		Fit map[string]any `json:"fit"`
-	}
+	var expected map[string]any
 	if err = json.Unmarshal(expectedData, &expected); err != nil {
 		t.Fatal(err)
 	}
-	if len(expected.Fit) == 0 {
-		t.Fatal("independent expected PCB fit decision/counts missing")
+	switch expected["decision"] {
+	case "clear", "interference", "indeterminate":
+	default:
+		t.Fatal("independent expected PCB fit decision missing")
 	}
-	return nativePairedFixture{Payload: p, Files: files, ExpectedFit: expected.Fit}
+	fit := map[string]any{"decision": expected["decision"]}
+	for _, key := range []string{"checkCount", "interferenceCount", "indeterminateCount"} {
+		if !nativeSummaryCount(expected[key], p.FitLimits["maxChecks"]) {
+			t.Fatalf("independent expected PCB fit %s missing or invalid", key)
+		}
+		fit[key] = expected[key]
+	}
+	if !nativeSummaryCount(expected["bodyCount"], nativePolicy["maxBodies"]) {
+		t.Fatal("independent expected PCB body count missing or invalid")
+	}
+	bodyCount := expected["bodyCount"].(float64)
+	return nativePairedFixture{Payload: p, Files: files, ExpectedFit: fit, ExpectedBodyCount: &bodyCount}
 }
 
 func TestNativePCBActualPairedVerification(t *testing.T) {
@@ -126,4 +137,15 @@ func TestNativePCBActualRejectsUnknownProtocol(t *testing.T) {
 
 func TestNativePCBActualMalformedThenNextJob(t *testing.T) {
 	runNativePairedFixture(t, loadPairedPCBFixture(t), nativeMalformedAndContinue)
+}
+
+func TestNativePCBPreparedIndependentInputFixture(t *testing.T) {
+	fixture := loadPairedPCBFixture(t)
+	if fixture.ExpectedFit["decision"] != "clear" || fixture.ExpectedFit["checkCount"] != float64(1) || fixture.ExpectedFit["interferenceCount"] != float64(0) || fixture.ExpectedFit["indeterminateCount"] != float64(0) {
+		t.Fatal("fixture expectations differ from the independently specified clear case")
+	}
+	if fixture.ExpectedBodyCount == nil || *fixture.ExpectedBodyCount != 2 {
+		t.Fatal("fixture body count differs from independently specified two-body case")
+	}
+	t.Log("prepared genuine captured PCB input; no native runtime was executed")
 }
