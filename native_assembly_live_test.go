@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -170,4 +172,73 @@ func TestNativeAssemblyPreparedInputFixture(t *testing.T) {
 	if string(actual) != string(want) {
 		t.Fatalf("prepared real fixture child metadata drifted\nwant %s\ngot %s", want, actual)
 	}
+}
+
+func TestNativeAssemblyActualDenoGeometry(t *testing.T) {
+	runtimeDir := os.Getenv("DTX_NATIVE_RUNTIME")
+	if runtimeDir == "" {
+		t.Skip("requires explicit compiled native runtime")
+	}
+	requireNativeRuntimeRelease(t, runtimeDir)
+	fixture := loadPairedAssemblyFixture(t)
+	p := fixture.Payload
+	input := filepath.Join(t.TempDir(), "input")
+	output := filepath.Join(t.TempDir(), "output")
+	for _, dir := range []string{input, filepath.Join(input, "sources"), filepath.Join(input, "assets"), output} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Chmod(output, 0777)
+	for path, data := range fixture.Files {
+		dest := filepath.Join(input, strings.TrimPrefix(path, "/"))
+		if path == "/document" {
+			dest = filepath.Join(input, "document.json")
+		} else if strings.HasPrefix(path, "/sources/") {
+			dest += ".json"
+		}
+		if err := os.WriteFile(dest, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := json.Marshal(nativeChildManifest(&p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(input, "job.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-assembly-test-direct", runtimeDir, input, output, p.RequestID, 2)
+	if err != nil {
+		t.Fatalf("actual assembly runtime failed: %v stdout=%s stderr=%s", err, stdout, stderr)
+	}
+	summary, err := verifyNativeOutput(stdout, &p, output)
+	if err != nil {
+		t.Fatalf("actual assembly output invalid: %v stdout=%s stderr=%s", err, stdout, stderr)
+	}
+	assembly := summary["assembly"].(map[string]any)
+	if assembly["closureHash"] != p.ClosureHash || assembly["occurrenceCount"] != fixture.ExpectedAssembly["occurrenceCount"] || assembly["mateCount"] != fixture.ExpectedAssembly["mateCount"] || assembly["bomHash"] != fixture.ExpectedBomHash {
+		t.Fatalf("actual assembly differs from independent expected evidence: %v", summary)
+	}
+	details, err := os.ReadFile(filepath.Join(output, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Bodies []struct {
+			Volume float64 `json:"volumeMm3"`
+		} `json:"bodies"`
+	}
+	if err := json.Unmarshal(details, &result); err != nil {
+		t.Fatal(err)
+	}
+	volumes := make([]float64, 0, len(result.Bodies))
+	for _, body := range result.Bodies {
+		volumes = append(volumes, body.Volume)
+	}
+	sort.Float64s(volumes)
+	if len(volumes) != 2 || math.Abs(volumes[0]-2000) > 0.001 || math.Abs(volumes[1]-3000) > 0.001 {
+		t.Fatalf("same-byte A/B configurations lost actual geometry identity: %v", volumes)
+	}
+	t.Logf("actual Deno assembly: occurrences=%v mates=%v BOM=%v volumes=%v cleanup=%v", assembly["occurrenceCount"], assembly["mateCount"], assembly["bomHash"], volumes, receipt["cleanupVerified"])
 }

@@ -194,20 +194,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	if runtimeDir == "" || documentPath == "" {
 		t.Skip("requires explicit compiled Deno fixture paths")
 	}
-	if release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME"); release != "" {
-		manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var m nativeManifest
-		if err := json.Unmarshal(manifest, &m); err != nil {
-			t.Fatal(err)
-		}
-		binary, err := os.ReadFile(filepath.Join(runtimeDir, "shape-native"))
-		if err != nil || hashNative(binary) != m.Executable.SHA256 {
-			t.Fatal("executed runtime differs from signed release")
-		}
-	}
+	requireNativeRuntimeRelease(t, runtimeDir)
 	data, err := os.ReadFile(documentPath)
 	if err != nil {
 		t.Fatal(err)
@@ -804,5 +791,23 @@ func TestNativeAssemblyStreamingKeepsJobVersionsSeparate(t *testing.T) {
 	data, _ = json.Marshal(map[string]any{"contractVersion": 1, "requestId": "assembly-request", "type": "limits", "applied": applied})
 	if newJob.write(append(data, '\n')) == nil {
 		t.Fatal("v2 monitor accepted v1 child")
+	}
+}
+
+func requireNativeRuntimeRelease(t *testing.T, runtimeDir string) {
+	t.Helper()
+	if release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME"); release != "" {
+		manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m nativeManifest
+		if err := json.Unmarshal(manifest, &m); err != nil {
+			t.Fatal(err)
+		}
+		binary, err := os.ReadFile(filepath.Join(runtimeDir, "shape-native"))
+		if err != nil || hashNative(binary) != m.Executable.SHA256 {
+			t.Fatal("executed runtime differs from signed release")
+		}
 	}
 }
