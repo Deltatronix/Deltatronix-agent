@@ -256,11 +256,11 @@ func printLLMHint(acceptable []string) {
 var defaultLLMTxt string
 
 func llmConfigPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := agentConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "dtx-agent", "llm.txt"), nil
+	return filepath.Join(dir, "llm.txt"), nil
 }
 
 // LLMSettings is the parsed content of llm.txt: the backend URL plus logging knobs.

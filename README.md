@@ -111,6 +111,35 @@ models in its logs. Install a model requested by the agent; with Ollama, use
 Keep the model server and agent running while you use local AI features in
 Deltatronix. The agent retries automatically if a connection is interrupted.
 
+## Local Shape execution
+
+The same paired agent can run bounded Shape regeneration and STEP/STL exports
+without a model server. This first native runtime supports Docker Linux arm64
+with cgroup v2 (including Docker Desktop on Apple Silicon). Install Docker and
+pull the pinned base image once:
+
+```sh
+docker pull node@sha256:78bc820a7a6148e8c48731eca18dbb9b6b2c05ac4a52138479be565f2831682d
+```
+
+Pair and run the agent normally. It advertises `shape.native.v1` when the local
+containment prerequisites pass. The server selects the runtime release; the agent
+downloads it through the existing authenticated connection, verifies its pinned
+Ed25519 signing key and archive/executable/WASM hashes, and runs its compiled
+Deno executable. The base image supplies system libraries. Runtime downloads do
+not require a GitHub token or local Deno installation.
+
+Each job has a read-only filesystem, no network, an unprivileged user, 1 GiB
+memory with no swap, one CPU and at most 64 processes. Inputs and outputs have
+explicit size limits. The agent renews its server lease every second and kills
+the container if the lease expires, pairing disconnects, or cancellation cannot
+finish within 250 ms. Containers are removed after jobs; reconnecting removes
+orphaned containers belonging to this pairing. Unsupported platforms refuse
+native work while vision capabilities continue independently.
+
+Regeneration returns a verification receipt for the saved document version.
+Exports upload real project files through the server's normal storage path.
+
 ## Everyday use
 
 - **Open the desktop app:** run `./dtx-agent`.
@@ -139,7 +168,12 @@ After adding the agent to PATH, you can use `dtx-agent` without the `./` prefix.
 
 ## Configuration
 
-The agent stores its settings in your user configuration folder:
+The agent stores its settings in your user configuration folder. Set
+`DTX_AGENT_CONFIG_DIR` to an absolute directory to use a separate pairing/profile
+without changing the desktop pairing. For clipboard-based pairing, pipe the
+code to `dtx-agent pair --code-stdin` so it does not appear in process arguments.
+
+Default locations:
 
 | Operating system | Default folder |
 | --- | --- |

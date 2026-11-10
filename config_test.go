@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,5 +56,85 @@ func TestLoadConfigParses(t *testing.T) {
 	}
 	if c.APIURL != "http://x" || c.AgentID != "id" || c.AgentToken != "tok" {
 		t.Errorf("parsed wrong: %+v", c)
+	}
+}
+
+func TestIsolatedAgentProfilePaths(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DTX_AGENT_CONFIG_DIR", dir)
+	config, _ := configPath()
+	llm, _ := llmConfigPath()
+	if config != filepath.Join(dir, "config.json") || llm != filepath.Join(dir, "llm.txt") || defaultLogPath() != filepath.Join(dir, "dtx-agent.log") {
+		t.Fatal("profile paths differ")
+	}
+	if err := saveConfig(Config{AgentToken: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(config)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("profile token is not private")
+	}
+	t.Setenv("DTX_AGENT_CONFIG_DIR", "relative")
+	if _, err := configPath(); err == nil {
+		t.Fatal("relative profile accepted")
+	}
+}
+func TestPairingCodeStdinIsBounded(t *testing.T) {
+	code, err := readPairingCode(strings.NewReader("  ABC123\n"))
+	if err != nil || code != "ABC123" {
+		t.Fatal("valid code rejected")
+	}
+	for _, bad := range []string{"", strings.Repeat("x", 129), "ABC\nDEF", "ABC\x00DEF"} {
+		if _, err := readPairingCode(strings.NewReader(bad)); err == nil {
+			t.Fatal("invalid code accepted")
+		}
+	}
+}
+
+func TestDefaultAgentProfilePathsRemainCompatible(t *testing.T) {
+	t.Setenv("DTX_AGENT_CONFIG_DIR", "")
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	config, _ := configPath()
+	llm, _ := llmConfigPath()
+	if config != filepath.Join(base, "dtx-agent", "config.json") || llm != filepath.Join(base, "dtx-agent", "llm.txt") || defaultLogPath() != filepath.Join(base, "dtx-agent", "dtx-agent.log") {
+		t.Fatal("default paths changed")
+	}
+}
+func TestPairStdinDoesNotPrintPairingSecrets(t *testing.T) {
+	t.Setenv("DTX_AGENT_CONFIG_DIR", t.TempDir())
+	const code = "TESTPAIRSECRET"
+	const token = "TESTTOKENKEEPPRIVATE"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["code"] != code {
+			t.Error("stdin pairing code was not sent")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"agentId":"qa-agent","agentToken":"TESTTOKENKEEPPRIVATE"}`))
+	}))
+	defer server.Close()
+	inR, inW, _ := os.Pipe()
+	outR, outW, _ := os.Pipe()
+	oldIn, oldOut := os.Stdin, os.Stdout
+	os.Stdin = inR
+	os.Stdout = outW
+	defer func() { os.Stdin = oldIn; os.Stdout = oldOut; inR.Close(); outR.Close() }()
+	io.WriteString(inW, code+"\n")
+	inW.Close()
+	err := cmdPair([]string{"--code-stdin", "--api", server.URL})
+	outW.Close()
+	output, _ := io.ReadAll(outR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), code) || strings.Contains(string(output), token) {
+		t.Fatal("pairing secret printed")
+	}
+	cfg, err := loadConfig()
+	if err != nil || cfg.AgentToken != token {
+		t.Fatal("isolated pairing did not persist")
 	}
 }

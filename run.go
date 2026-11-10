@@ -10,7 +10,10 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -48,7 +51,9 @@ func cmdRun(headless bool) error {
 // connectForever runs the connect loop until the process exits — the headless
 // entrypoint.
 func connectForever(cfg Config) {
-	connectLoop(context.Background(), cfg)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	connectLoop(ctx, cfg)
 }
 
 // connectLoop serves and reconnects with jittered backoff, broadcasting status
@@ -128,6 +133,7 @@ type agent struct {
 	conn *websocket.Conn
 	ctx  context.Context
 
+	jobsWG  sync.WaitGroup
 	writeMu sync.Mutex // serializes conn.Write (one writer at a time)
 
 	mu           sync.Mutex
@@ -137,6 +143,9 @@ type agent struct {
 	lastCap      bool // last advertised llm.vision state
 	hintShown    bool
 	busy         bool
+	nativeLeases map[string]nativeLease
+	nativeCap    bool
+	nativeReady  bool
 	jobs         map[string]context.CancelFunc
 }
 
@@ -157,7 +166,12 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	log.Printf("connected")
 	setStatus("Connected")
 
-	a := &agent{cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
+	recoveryErr := reconcileNativeContainers(ctx, cfg.AgentID)
+	if recoveryErr != nil {
+		log.Printf("native recovery unavailable: %v", recoveryErr)
+	}
+	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
+	defer func() { cancel(); a.jobsWG.Wait() }()
 	go a.reprobeLoop()
 
 	for {
@@ -188,13 +202,34 @@ func (a *agent) dispatch(data []byte) {
 		log.Printf("bad frame: %v", err)
 		return
 	}
+	var native struct {
+		Type      string          `json:"type"`
+		JobType   string          `json:"jobType"`
+		JobID     string          `json:"jobId"`
+		LeaseID   string          `json:"leaseId"`
+		ExpiresAt int64           `json:"expiresAt"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	_ = json.Unmarshal(data, &native)
+	if native.Type == "job.lease" {
+		a.onNativeLease(native.JobID, native.LeaseID, native.ExpiresAt)
+		return
+	}
+	if native.Type == "SHAPE_NATIVE" || (native.Type == "job.assign" && native.JobType == "SHAPE_NATIVE") {
+		var p nativePayload
+		if err := json.Unmarshal(native.Payload, &p); err != nil {
+			return
+		}
+		a.launchJob(func() { a.runNativeJob(native.JobID, &p) })
+		return
+	}
 	switch routeFrame(f) {
 	case kindConfig:
 		a.onConfig(f.VisionModels)
 	case kindCancel:
 		a.cancelJob(f.JobID)
 	case kindAssign:
-		go a.runJob(f.JobID, f.Payload)
+		a.launchJob(func() { a.runJob(f.JobID, f.Payload) })
 	default:
 		log.Printf("ignoring unknown frame type %q", f.Type)
 	}
@@ -236,6 +271,17 @@ func (a *agent) probeAndAdvertise() {
 	has := probeErr == nil && hasVisionModel(installed, models)
 
 	a.mu.Lock()
+	ready := a.nativeReady
+	busy := a.busy
+	a.mu.Unlock()
+	if !ready && !busy {
+		ready = reconcileNativeContainers(a.ctx, a.cfg.AgentID) == nil
+		a.mu.Lock()
+		a.nativeReady = ready
+		a.mu.Unlock()
+	}
+	nativeAvailable := ready && probeNativeContainer(a.ctx) == nil
+	a.mu.Lock()
 	if probeErr != nil && !a.hintShown {
 		printLLMHint(models)
 		a.hintShown = true
@@ -251,7 +297,8 @@ func (a *agent) probeAndAdvertise() {
 	default:
 		setStatus(statusNoVisionModel)
 	}
-	changed := !a.advertised || has != a.lastCap
+	changed := !a.advertised || has != a.lastCap || nativeAvailable != a.nativeCap
+	a.nativeCap = nativeAvailable
 	a.lastCap = has
 	a.advertised = true
 	a.mu.Unlock()
@@ -262,6 +309,9 @@ func (a *agent) probeAndAdvertise() {
 	caps := []string{}
 	if has {
 		caps = []string{"llm.vision"}
+	}
+	if nativeAvailable {
+		caps = append(caps, "shape.native.v1")
 	}
 	log.Printf("advertising capabilities: %v", caps)
 	a.send(map[string]any{"type": "capabilities", "capabilities": caps})
@@ -357,3 +407,6 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
+
+// Register before scheduling so a disconnected reader can safely join every job.
+func (a *agent) launchJob(run func()) { a.jobsWG.Add(1); go func() { defer a.jobsWG.Done(); run() }() }

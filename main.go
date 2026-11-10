@@ -82,6 +82,7 @@ func usage() {
 
 Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
+  dtx-agent pair --code-stdin [--api https://api.deltatronix.io]
   dtx-agent run [--headless]
   dtx-agent autostart enable [--headless] [--mode xdg|systemd]
   dtx-agent autostart disable
@@ -105,6 +106,7 @@ func fatal(err error) {
 func cmdPair(args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	api := fs.String("api", defaultAPI, "backend API base URL")
+	codeStdin := fs.Bool("code-stdin", false, "read pairing code from stdin")
 
 	// Accept the code either before or after flags.
 	var code string
@@ -118,8 +120,18 @@ func cmdPair(args []string) error {
 	if code == "" {
 		code = fs.Arg(0)
 	}
+	if *codeStdin {
+		if code != "" {
+			return errors.New("use a code argument or --code-stdin, not both")
+		}
+		var err error
+		code, err = readPairingCode(os.Stdin)
+		if err != nil {
+			return err
+		}
+	}
 	if code == "" {
-		return errors.New("usage: dtx-agent pair <code> [--api URL]")
+		return errors.New("usage: dtx-agent pair <code> [--api URL], or pair --code-stdin")
 	}
 
 	apiURL := strings.TrimRight(*api, "/")
@@ -216,4 +228,19 @@ func revokeAgent(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("revoke failed (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
 	}
 	return nil
+}
+
+func readPairingCode(input io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(input, 129))
+	if err != nil {
+		return "", errors.New("cannot read pairing code")
+	}
+	if len(data) > 128 {
+		return "", errors.New("pairing code exceeds limit")
+	}
+	code := strings.TrimSpace(string(data))
+	if code == "" || strings.ContainsAny(code, "\r\n\x00") {
+		return "", errors.New("invalid pairing code")
+	}
+	return code, nil
 }
