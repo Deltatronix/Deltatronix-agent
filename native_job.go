@@ -306,12 +306,12 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	if ctx.Err() != nil || !valid {
 		return
 	}
-	frame := map[string]any{"type": "job.result", "jobId": jobID, "leaseId": p.Lease.ID, "ok": true, "result": map[string]any{"schemaVersion": 1, "summary": result, "receipt": receipt, "output": outputReceipt}}
-	encoded, _ := json.Marshal(frame)
-	if len(encoded) > 256<<10 {
-		fail(errors.New("native result envelope exceeds limit"))
+	frame, err := nativeResultFrame(jobID, p, result, receipt, outputReceipt)
+	if err != nil {
+		fail(err)
 		return
 	}
+
 	a.send(frame)
 }
 
@@ -493,4 +493,17 @@ func boundedNativeError(err error) string {
 		return s[:2048]
 	}
 	return s
+}
+
+func nativeResultFrame(jobID string, p *nativePayload, summary, receipt map[string]any, output any) (map[string]any, error) {
+	receipt["artifactId"] = p.Runtime.ArtifactID
+	frame := map[string]any{"type": "job.result", "jobId": jobID, "leaseId": p.Lease.ID, "ok": true, "result": map[string]any{"schemaVersion": 1, "summary": summary, "receipt": receipt, "output": output}}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > 256<<10 {
+		return nil, errors.New("native result envelope exceeds limit")
+	}
+	return frame, nil
 }

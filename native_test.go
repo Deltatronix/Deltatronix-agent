@@ -293,3 +293,73 @@ func TestNativeSignedRuntimeInstall(t *testing.T) {
 	}
 	t.Logf("verified signed archive/executable/WASM: %s", m.ArtifactID)
 }
+
+func TestNativeStartupAndWorkDeadlines(t *testing.T) {
+	t.Run("startup has its own short bound", func(t *testing.T) {
+		done := make(chan error)
+		running := make(chan struct{})
+		start := time.Now()
+		exited, err := waitNativeExecution(context.Background(), done, running, 15*time.Millisecond, time.Second)
+		if exited || err == nil || !strings.Contains(err.Error(), "startup") || time.Since(start) > 300*time.Millisecond {
+			t.Fatalf("wrong startup bound: %v %v", exited, err)
+		}
+	})
+	t.Run("running starts a full work budget", func(t *testing.T) {
+		done := make(chan error, 1)
+		running := make(chan struct{}, 1)
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			running <- struct{}{}
+			time.Sleep(35 * time.Millisecond)
+			done <- nil
+		}()
+		exited, err := waitNativeExecution(context.Background(), done, running, 30*time.Millisecond, 80*time.Millisecond)
+		if !exited || err != nil {
+			t.Fatalf("work incorrectly used startup clock: %v %v", exited, err)
+		}
+	})
+	t.Run("work deadline remains bounded", func(t *testing.T) {
+		done := make(chan error)
+		running := make(chan struct{}, 1)
+		running <- struct{}{}
+		exited, err := waitNativeExecution(context.Background(), done, running, time.Second, 10*time.Millisecond)
+		if exited || err == nil || !strings.Contains(err.Error(), "work") {
+			t.Fatalf("wrong work bound: %v %v", exited, err)
+		}
+	})
+}
+func TestNativeStreamingRejectsResultBeforeRunningAndLateFrames(t *testing.T) {
+	for _, frames := range [][]string{{`{"type":"result"}`}, {`{"type":"limits"}`, `{"type":"limits"}`}, {`{"type":"limits"}`, `{"type":"phase","phase":"booting"}`, `{"type":"phase","phase":"running"}`, `{"type":"result"}`, `{"type":"phase","phase":"exporting"}`}} {
+		m := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+		var err error
+		for _, frame := range frames {
+			var f map[string]any
+			json.Unmarshal([]byte(frame), &f)
+			f["contractVersion"] = 1
+			f["requestId"] = "request"
+			data, _ := json.Marshal(f)
+			err = m.write(append(data, '\n'))
+			if err != nil {
+				break
+			}
+		}
+		if err == nil {
+			t.Fatal("out-of-order stream accepted")
+		}
+	}
+}
+
+func TestNativeSuccessReceiptNamesAssignedArtifact(t *testing.T) {
+	p := &nativePayload{}
+	p.Runtime.ArtifactID = "shape-native-v1-0123456789abcdef0123"
+	p.Lease.ID = "lease"
+	frame, err := nativeResultFrame("job", p, map[string]any{}, map[string]any{"artifactId": "stale"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := frame["result"].(map[string]any)
+	receipt := result["receipt"].(map[string]any)
+	if receipt["artifactId"] != p.Runtime.ArtifactID || frame["leaseId"] != "lease" {
+		t.Fatal("runtime/lease identity lost")
+	}
+}

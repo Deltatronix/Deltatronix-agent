@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type boundedNativeBuffer struct {
 	b        bytes.Buffer
 	max      int
 	overflow context.CancelFunc
+	observe  func([]byte) error
 }
 
 func (b *boundedNativeBuffer) Write(p []byte) (int, error) {
@@ -50,6 +52,12 @@ func (b *boundedNativeBuffer) Write(p []byte) (int, error) {
 	if b.b.Len()+len(p) > b.max {
 		b.overflow()
 		return 0, errors.New("native output limit exceeded")
+	}
+	if b.observe != nil {
+		if err := b.observe(p); err != nil {
+			b.overflow()
+			return 0, err
+		}
 	}
 	return b.b.Write(p)
 }
@@ -76,10 +84,11 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 			return nil, nil, nil, errors.New("invalid native mount path")
 		}
 	}
+	startupDeadline := time.Now().Add(30 * time.Second)
 	if err = probeNativeContainer(ctx); err != nil {
 		return
 	}
-	startup, cancelStartup := context.WithTimeout(ctx, 30*time.Second)
+	startup, cancelStartup := context.WithDeadline(ctx, startupDeadline)
 	out, createErr := exec.CommandContext(startup, "docker", nativeContainerArgs(name, runtimeDir, inputDir, outputDir)...).CombinedOutput()
 	cancelStartup()
 	if createErr != nil {
@@ -96,9 +105,11 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 			receipt["cleanupVerified"] = true
 		}
 	}()
-	work, cancel := context.WithTimeout(ctx, 60*time.Second)
+	work, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stdoutBuffer := &boundedNativeBuffer{max: 12 << 20, overflow: cancel}
+	running := make(chan struct{}, 1)
+	monitor := &nativeOutputMonitor{requestID: requestID, running: running}
+	stdoutBuffer := &boundedNativeBuffer{max: 12 << 20, overflow: cancel, observe: monitor.write}
 	stderrBuffer := &boundedNativeBuffer{max: 64 << 10, overflow: cancel}
 	cmd := exec.Command("docker", "start", "--attach", "--interactive", name)
 	stdin, pipeErr := cmd.StdinPipe()
@@ -112,9 +123,9 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	select {
-	case err = <-done:
-	case <-work.Done():
+	exited, waitErr := waitNativeExecution(work, done, running, time.Until(startupDeadline), 60*time.Second)
+	err = waitErr
+	if !exited {
 		cancelFrame, _ := json.Marshal(map[string]any{"contractVersion": 1, "type": "cancel", "requestId": requestID})
 		_, _ = io.WriteString(stdin, string(cancelFrame)+"\n")
 		select {
@@ -126,9 +137,12 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 			}
 			<-done
 		}
-		err = work.Err()
 	}
+
 	_ = stdin.Close()
+	if err == nil && len(monitor.pending) > 0 {
+		err = errors.New("incomplete native JSONL frame")
+	}
 	stdout = stdoutBuffer.Bytes()
 	stderr = stderrBuffer.Bytes()
 	return
@@ -229,4 +243,118 @@ func reconcileNativeContainers(ctx context.Context, agentID string) error {
 		}
 	}
 	return nil
+}
+
+// The work clock begins only after the child reports a validated running phase.
+func waitNativeExecution(ctx context.Context, done <-chan error, running <-chan struct{}, startup, wall time.Duration) (bool, error) {
+	timer := time.NewTimer(startup)
+	defer timer.Stop()
+	phaseRunning := false
+	for {
+		select {
+		case err := <-done:
+			return true, err
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-running:
+			if phaseRunning {
+				return false, errors.New("duplicate native running phase")
+			}
+			phaseRunning = true
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(wall)
+		case <-timer.C:
+			if phaseRunning {
+				return false, errors.New("native work timeout")
+			}
+			return false, errors.New("native startup timeout")
+		}
+	}
+}
+
+type nativeOutputMonitor struct {
+	requestID string
+	running   chan<- struct{}
+	pending   []byte
+	limits    bool
+	booting   bool
+	started   bool
+	terminal  bool
+}
+
+func (m *nativeOutputMonitor) write(p []byte) error {
+	m.pending = append(m.pending, p...)
+	for {
+		end := bytes.IndexByte(m.pending, '\n')
+		if end < 0 {
+			if len(m.pending) > 256<<10 {
+				return errors.New("native JSONL line exceeds limit")
+			}
+			return nil
+		}
+		if end > 256<<10 {
+			return errors.New("native JSONL line exceeds limit")
+		}
+		line := m.pending[:end]
+		m.pending = m.pending[end+1:]
+		var f struct {
+			ContractVersion int    `json:"contractVersion"`
+			RequestID       string `json:"requestId"`
+			Type            string `json:"type"`
+			Phase           string `json:"phase"`
+		}
+		if err := json.Unmarshal(line, &f); err != nil {
+			return errors.New("invalid native JSONL")
+		}
+		if f.ContractVersion != 1 || f.RequestID != m.requestID || m.terminal {
+			return errors.New("native output identity/order mismatch")
+		}
+		switch f.Type {
+		case "limits":
+			if m.limits || m.booting {
+				return errors.New("duplicate native limits")
+			}
+			m.limits = true
+		case "phase":
+			if !m.limits {
+				return errors.New("native phase before limits")
+			}
+			switch f.Phase {
+			case "booting":
+				if m.booting || m.started {
+					return errors.New("duplicate native booting")
+				}
+				m.booting = true
+			case "running":
+				if !m.booting || m.started {
+					return errors.New("native running order mismatch")
+				}
+				m.started = true
+				m.running <- struct{}{}
+			case "exporting":
+				if !m.started {
+					return errors.New("native export before running")
+				}
+			default:
+				featureIndex, featureErr := strconv.Atoi(strings.TrimPrefix(f.Phase, "feature:"))
+				if !m.started || !strings.HasPrefix(f.Phase, "feature:") || featureErr != nil || featureIndex < 0 {
+					return errors.New("invalid native phase")
+				}
+			}
+		case "result":
+			if !m.limits || !m.started {
+				return errors.New("native result before running")
+			}
+			m.terminal = true
+		case "refused":
+			m.terminal = true
+		default:
+			return errors.New("unknown native frame")
+		}
+	}
 }
