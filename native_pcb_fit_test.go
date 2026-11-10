@@ -153,7 +153,7 @@ func TestNativePCBRejectsUnboundedCaptureAndConfiguration(t *testing.T) {
 
 func TestNativePCBRejectsUnknownWireFields(t *testing.T) {
 	p, _ := pcbFitWireFixture(t)
-	data, _ := json.Marshal(p)
+	data, _ := json.Marshal(nativePayloadWire(t, p))
 	var wire map[string]any
 	json.Unmarshal(data, &wire)
 	wire["boardCaptures"].([]any)[0].(map[string]any)["capture"].(map[string]any)["path"] = "../escape"
@@ -166,7 +166,7 @@ func TestNativePCBRejectsUnknownWireFields(t *testing.T) {
 
 func TestNativePCBMalformedAssignmentReturnsGenericFailure(t *testing.T) {
 	p, _ := pcbFitWireFixture(t)
-	payload, _ := json.Marshal(p)
+	payload, _ := json.Marshal(nativePayloadWire(t, p))
 	var wire map[string]any
 	json.Unmarshal(payload, &wire)
 	wire["unknownField"] = "https://secret.invalid/source"
@@ -248,4 +248,52 @@ func TestNativePCBProofBindsCaptureProvenanceNotTransport(t *testing.T) {
 	if validateNativePayload(p) == nil {
 		t.Fatal("changed capture provenance retained previous proof")
 	}
+}
+
+func TestNativePCBWireRequiresExplicitNullableFields(t *testing.T) {
+	data, err := os.ReadFile("testdata/pcb-fit-wire-v3.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"configurationId", "revisionId", "version-null", "legacy-field"} {
+		t.Run(field, func(t *testing.T) {
+			var fixture map[string]any
+			json.Unmarshal(data, &fixture)
+			wire := fixture["assignment"].(map[string]any)["payload"].(map[string]any)
+			switch field {
+			case "configurationId":
+				delete(wire, field)
+			case "revisionId":
+				delete(wire["boardCaptures"].([]any)[0].(map[string]any)["capture"].(map[string]any), field)
+			case "version-null":
+				wire["version"] = nil
+			case "legacy-field":
+				wire["sourceDocuments"] = nil
+			}
+			encoded, _ := json.Marshal(wire)
+			var payload nativePayload
+			if json.Unmarshal(encoded, &payload) == nil {
+				t.Fatal("incomplete or non-V3 wire accepted")
+			}
+		})
+	}
+}
+
+// The actual backend emits one protocol's fields, not Go's union zero values.
+func nativePayloadWire(t *testing.T, p *nativePayload) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err = json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if p.ContractVersion == 3 {
+		delete(wire, "sourceDocuments")
+		delete(wire, "assemblyLimits")
+		delete(wire, "closureHash")
+	}
+	return wire
 }

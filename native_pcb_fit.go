@@ -191,6 +191,40 @@ func (p *nativePayload) UnmarshalJSON(data []byte) error {
 	if version.ContractVersion != 3 {
 		return json.Unmarshal(data, (*payload)(p))
 	}
+	var wire map[string]any
+	if json.Unmarshal(data, &wire) != nil || !nativeExactFields(wire, []string{"contractVersion", "targetKind", "requestId", "documentId", "version", "snapshotId", "document", "configurationId", "operation", "limits", "fitLimits", "boardCaptures", "assets", "proofHash", "lease", "runtime"}) || !nativeSummaryCount(wire["version"], 9007199254740991) {
+		return errors.New("invalid native PCB assignment fields")
+	}
+	for key, fields := range map[string][]string{"document": {"hash", "size", "url"}, "lease": {"id", "expiresAt"}, "runtime": {"artifactId", "manifestUrl"}} {
+		object, ok := wire[key].(map[string]any)
+		if !ok || !nativeExactFields(object, fields) {
+			return errors.New("invalid native PCB assignment metadata")
+		}
+	}
+	assets, ok := wire["assets"].([]any)
+	if !ok {
+		return errors.New("invalid native PCB asset list")
+	}
+	for _, raw := range assets {
+		asset, ok := raw.(map[string]any)
+		if !ok || !nativeExactFields(asset, []string{"hash", "size", "url"}) {
+			return errors.New("invalid native PCB asset fields")
+		}
+	}
+	captures, ok := wire["boardCaptures"].([]any)
+	if !ok {
+		return errors.New("invalid native PCB capture list")
+	}
+	for _, raw := range captures {
+		capture, ok := raw.(map[string]any)
+		if !ok || !nativeExactFields(capture, []string{"referenceId", "designId", "boardId", "capture", "rawSize"}) {
+			return errors.New("invalid native PCB capture fields")
+		}
+		proof, ok := capture["capture"].(map[string]any)
+		if !ok || !nativeExactFields(proof, []string{"assetId", "sourceSnapshotId", "sourceHash", "revisionId"}) {
+			return errors.New("invalid native PCB provenance fields")
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode((*payload)(p)); err != nil {

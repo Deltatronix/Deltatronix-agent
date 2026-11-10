@@ -582,13 +582,9 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 		assignedJobID := jobID
 		sendAssign := func(id string) error {
 			assignedJobID = id
-			var payload any = p
+			payload := nativePayloadWire(t, &p)
 			if scenario == nativeMalformedAndContinue && id == jobID {
-				data, _ := json.Marshal(p)
-				var malformed map[string]any
-				json.Unmarshal(data, &malformed)
-				malformed["unknownField"] = "https://secret.invalid/capture"
-				payload = malformed
+				payload["unknownField"] = "https://secret.invalid/capture"
 			}
 			data, err := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": id, "payload": payload})
 			if err != nil {

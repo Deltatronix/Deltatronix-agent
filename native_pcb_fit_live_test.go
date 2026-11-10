@@ -43,6 +43,9 @@ func loadPairedPCBFixture(t *testing.T) nativePairedFixture {
 	child["snapshotId"] = "fixture-root-snapshot"
 	child["lease"] = map[string]any{"id": "fixture-lease", "expiresAt": time.Now().Add(time.Minute).UnixMilli()}
 	child["runtime"] = map[string]any{"artifactId": "shape-native-v3-fixture", "manifestUrl": ""}
+	for _, raw := range child["assets"].([]any) {
+		raw.(map[string]any)["url"] = ""
+	}
 	payload, err := json.Marshal(child)
 	if err != nil {
 		t.Fatal(err)
