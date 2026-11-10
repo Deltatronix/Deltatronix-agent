@@ -263,3 +263,23 @@ func TestToOllamaImagePassthrough(t *testing.T) {
 		t.Error("undecodable webp must fall back to original bytes")
 	}
 }
+
+func TestChatSettingsRejectInvalidSelectionBeforeOverwriting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	selected := LLMSettings{BackendURL: "http://127.0.0.1:11434/v1", ChatModel: "fixture-chat:7b", ChatContextTokens: 8192}
+	if err := writeLLMSettings(selected); err != nil {
+		t.Fatal(err)
+	}
+	got := loadLLMSettings()
+	if got.ChatModel != "fixture-chat:7b" || got.ChatContextTokens != 8192 {
+		t.Fatalf("saved chat selection was not retained: model=%q cap=%d", got.ChatModel, got.ChatContextTokens)
+	}
+	selected.ChatContextTokens = 0
+	if err := writeLLMSettings(selected); err == nil {
+		t.Fatal("saving an enabled chat model without its context cap must fail")
+	}
+	if got := loadLLMSettings(); got.ChatContextTokens != 8192 {
+		t.Error("invalid save overwrote the last valid chat settings")
+	}
+}
