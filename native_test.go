@@ -173,28 +173,57 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 }
 
 func TestNativeGenuineDenoRuntime(t *testing.T) {
+	runGenuineNativeFixture(t, os.Getenv("DTX_NATIVE_DOCUMENT"), "regenerate")
+}
+func TestNativeGenuineDenoExports(t *testing.T) {
+	documentPath := os.Getenv("DTX_NATIVE_EXPORT_DOCUMENT")
+	if documentPath == "" {
+		t.Skip("requires explicit nonempty saved document")
+	}
+	for _, format := range []string{"step", "stl"} {
+		t.Run(format, func(t *testing.T) { runGenuineNativeFixture(t, documentPath, format) })
+	}
+}
+func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
+	t.Helper()
 	runtimeDir := os.Getenv("DTX_NATIVE_RUNTIME")
-	documentPath := os.Getenv("DTX_NATIVE_DOCUMENT")
 	if runtimeDir == "" || documentPath == "" {
 		t.Skip("requires explicit compiled Deno fixture paths")
+	}
+	if release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME"); release != "" {
+		manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m nativeManifest
+		if err := json.Unmarshal(manifest, &m); err != nil {
+			t.Fatal(err)
+		}
+		binary, err := os.ReadFile(filepath.Join(runtimeDir, "shape-native"))
+		if err != nil || hashNative(binary) != m.Executable.SHA256 {
+			t.Fatal("executed runtime differs from signed release")
+		}
 	}
 	data, err := os.ReadFile(documentPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	os.Chmod(root, 0755)
 	input := filepath.Join(root, "input")
 	output := filepath.Join(root, "output")
 	os.MkdirAll(input, 0755)
 	os.MkdirAll(output, 0777)
 	os.Chmod(output, 0777)
 	os.WriteFile(filepath.Join(input, "document.json"), data, 0644)
-	p := &nativePayload{RequestID: "companion-real-deno"}
-	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": "companion-test", "version": 1}, "documentHash": hashNative(data), "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "assets": []any{}}
+	p := &nativePayload{RequestID: "companion-real-deno-" + operation}
+	op := map[string]any{"kind": "regenerate"}
+	if operation != "regenerate" {
+		op = map[string]any{"kind": "export", "format": operation, "qualityScale": 1}
+	}
+	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": "companion-test", "version": 1}, "documentHash": hashNative(data), "configurationId": nil, "operation": op, "limits": nativePolicy, "assets": []any{}}
 	wire, _ := json.Marshal(job)
 	os.WriteFile(filepath.Join(input, "job.json"), wire, 0644)
-	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno", runtimeDir, input, output, p.RequestID)
+	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno-"+operation, runtimeDir, input, output, p.RequestID)
 	if err != nil {
 		t.Fatalf("Deno run: %v stdout=%s stderr=%s", err, stdout, stderr)
 	}
@@ -202,7 +231,23 @@ func TestNativeGenuineDenoRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deno output: %v stdout=%s stderr=%s", err, stdout, stderr)
 	}
-	t.Logf("genuine Deno summary=%v receipt=%v", summary, receipt)
+	if operation != "regenerate" {
+		exported, err := os.ReadFile(filepath.Join(output, "export.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, ok := summary["file"].(map[string]any)
+		if !ok || file["format"] != operation || file["hash"] != hashNative(exported) || file["size"] != float64(len(exported)) || summary["bodyCount"].(float64) <= 0 {
+			t.Fatal("invalid real export metadata")
+		}
+		if operation == "step" && !bytes.Contains(exported, []byte("ISO-10303-21")) {
+			t.Fatal("STEP header missing")
+		}
+		if operation == "stl" && len(exported) < 84 && !bytes.HasPrefix(exported, []byte("solid")) {
+			t.Fatal("STL payload missing")
+		}
+	}
+	t.Logf("genuine Deno operation=%s summary=%v receipt=%v", operation, summary, receipt)
 }
 
 func TestNativeDockerTouchedMemoryOOM(t *testing.T) {
