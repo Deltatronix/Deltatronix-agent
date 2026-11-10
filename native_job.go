@@ -194,19 +194,39 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.jobs[jobID] = cancel
 	a.mu.Unlock()
+	cleanupVerified := true
+	var finalFrame map[string]any
 	defer func() {
+		interrupted := ctx.Err() != nil
 		cancel()
 		a.mu.Lock()
 		delete(a.jobs, jobID)
 		delete(a.nativeLeases, jobID)
 		a.busy = false
+		if !cleanupVerified {
+			a.nativeReady = false
+		}
 		a.mu.Unlock()
+		if !cleanupVerified {
+			a.conn.CloseNow()
+			return
+		}
+		if a.ctx.Err() != nil {
+			return
+		}
+		if interrupted && p != nil {
+			finalFrame = map[string]any{"type": "job.result", "jobId": jobID, "leaseId": p.Lease.ID, "ok": false, "error": "Native job cancelled after cleanup."}
+		}
+		if finalFrame != nil {
+			a.send(finalFrame)
+		}
 	}()
 	fail := func(err error) {
 		if ctx.Err() == nil {
-			a.send(map[string]any{"type": "job.result", "jobId": jobID, "leaseId": p.Lease.ID, "ok": false, "error": boundedNativeError(err)})
+			finalFrame = map[string]any{"type": "job.result", "jobId": jobID, "leaseId": p.Lease.ID, "ok": false, "error": boundedNativeError(err)}
 		}
 	}
+
 	if err := validateNativePayload(p); err != nil {
 		if p != nil {
 			fail(err)
@@ -276,6 +296,7 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	}
 	startupCancel()
 	stdout, stderr, receipt, err := runNativeContainer(ctx, "dtx-shape-"+hashNative([]byte(a.cfg.AgentID))[:12]+"-"+hashNative([]byte(jobID))[:12], runtimeDir, input, output, p.RequestID)
+	cleanupVerified = receipt != nil && receipt["cleanupVerified"] == true
 	if err != nil {
 		fail(err)
 		return
@@ -312,7 +333,7 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 		return
 	}
 
-	a.send(frame)
+	finalFrame = frame
 }
 
 type nativeLease struct {

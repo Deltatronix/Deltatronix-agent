@@ -81,9 +81,10 @@ func removeNativeContainer(name string) error {
 }
 
 func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputDir, requestID string) (stdout, stderr []byte, receipt map[string]any, err error) {
+	receipt = map[string]any{"cleanupVerified": true}
 	for _, p := range []string{runtimeDir, inputDir, outputDir} {
 		if !filepath.IsAbs(p) || strings.Contains(p, ",") {
-			return nil, nil, nil, errors.New("invalid native mount path")
+			return nil, nil, receipt, errors.New("invalid native mount path")
 		}
 	}
 	startupDeadline := time.Now().Add(30 * time.Second)
@@ -94,16 +95,21 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	out, createErr := exec.CommandContext(startup, "docker", nativeContainerArgs(name, runtimeDir, inputDir, outputDir)...).CombinedOutput()
 	cancelStartup()
 	if createErr != nil {
-		_ = removeNativeContainer(name)
-		return nil, nil, nil, fmt.Errorf("create native container: %w: %s", createErr, out)
+		cleanupErr := removeNativeContainer(name)
+		receipt["cleanupVerified"] = cleanupErr == nil
+		return nil, nil, receipt, fmt.Errorf("create native container: %w: %s", errors.Join(createErr, cleanupErr), out)
 	}
+	receipt["cleanupVerified"] = false
 	defer func() {
 		if err == nil {
 			receipt, err = inspectNativeReceipt(name)
 		}
 		if cleanupErr := removeNativeContainer(name); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
-		} else if receipt != nil {
+		} else {
+			if receipt == nil {
+				receipt = map[string]any{}
+			}
 			receipt["cleanupVerified"] = true
 		}
 	}()
@@ -116,7 +122,7 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	cmd := exec.Command("docker", "start", "--attach", "--interactive", name)
 	stdin, pipeErr := cmd.StdinPipe()
 	if pipeErr != nil {
-		return nil, nil, nil, pipeErr
+		return nil, nil, receipt, pipeErr
 	}
 	cmd.Stdout = stdoutBuffer
 	cmd.Stderr = stderrBuffer

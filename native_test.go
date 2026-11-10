@@ -478,6 +478,11 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 		connectForever(Config{APIURL: os.Getenv("DTX_NATIVE_STOP_API"), AgentID: "native-stop-integration", AgentToken: "test-paired-token"})
 		return
 	}
+	runNativePairedProcess(t, false)
+}
+func TestNativeCancelThenNextJobSameConnection(t *testing.T) { runNativePairedProcess(t, true) }
+func runNativePairedProcess(t *testing.T, cancelFirst bool) {
+	t.Helper()
 	release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME")
 	documentPath := os.Getenv("DTX_NATIVE_DOCUMENT")
 	if release == "" || documentPath == "" {
@@ -497,6 +502,11 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 	requestID := "process-stop-request"
 	agentID := "native-stop-integration"
 	containerName := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(jobID))[:12]
+	cancelNow := make(chan struct{})
+	nextResult := make(chan map[string]any, 1)
+	protocolError := make(chan error, 1)
+	nextJobID := jobID + "-next"
+	nextContainer := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(nextJobID))[:12]
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/document" {
@@ -529,9 +539,43 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 		if conn.Write(r.Context(), websocket.MessageText, frame) != nil {
 			return
 		}
+		if cancelFirst {
+			go func() {
+				select {
+				case <-cancelNow:
+					data, _ := json.Marshal(map[string]any{"type": "job.cancel", "jobId": jobID, "leaseId": "stop-lease"})
+					_ = conn.Write(r.Context(), websocket.MessageText, data)
+				case <-r.Context().Done():
+				}
+			}()
+		}
 		for {
-			if _, _, err := conn.Read(r.Context()); err != nil {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
 				return
+			}
+			var received map[string]any
+			if json.Unmarshal(data, &received) != nil || received["type"] != "job.result" {
+				continue
+			}
+			if cancelFirst && received["jobId"] == jobID {
+				if received["ok"] != false || received["leaseId"] != "stop-lease" {
+					protocolError <- fmt.Errorf("cancelled job emitted success/wrong lease: %v", received)
+					return
+				}
+				out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name="+containerName).Output()
+				if err != nil || len(bytes.TrimSpace(out)) != 0 {
+					protocolError <- fmt.Errorf("acknowledged before container cleanup: %s %v", out, err)
+					return
+				}
+				p["requestId"] = requestID + "-next"
+				p["lease"] = map[string]any{"id": "next-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}
+				next, _ := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": nextJobID, "payload": p})
+				if conn.Write(r.Context(), websocket.MessageText, next) != nil {
+					return
+				}
+			} else if cancelFirst && received["jobId"] == nextJobID {
+				nextResult <- received
 			}
 		}
 	}))
@@ -552,7 +596,14 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	defer func() { cancel(); _ = cmd.Process.Kill(); _ = removeNativeContainer(containerName) }()
+	defer func() {
+		cancel()
+		_ = cmd.Process.Kill()
+		_ = removeNativeContainer(containerName)
+		if cancelFirst {
+			_ = removeNativeContainer(nextContainer)
+		}
+	}()
 	deadline := time.Now().Add(12 * time.Second)
 	running := false
 	for time.Now().Before(deadline) {
@@ -569,6 +620,28 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 	}
 	if !running {
 		t.Fatalf("native container never started: %s", string(log.Bytes()))
+	}
+	if cancelFirst {
+		close(cancelNow)
+		select {
+		case err := <-protocolError:
+			t.Fatal(err)
+		case frame := <-nextResult:
+			if frame["ok"] != true || frame["leaseId"] != "next-lease" {
+				t.Fatalf("next job failed after cancellation: %v child=%s", frame, string(log.Bytes()))
+			}
+			result, ok := frame["result"].(map[string]any)
+			if !ok {
+				t.Fatal("next job result missing")
+			}
+			receipt, ok := result["receipt"].(map[string]any)
+			if !ok || receipt["cleanupVerified"] != true || receipt["artifactId"] != m.ArtifactID {
+				t.Fatal("next job receipt missing cleanup/runtime identity")
+			}
+			t.Log("cancel failure acknowledged after removal; next real signed Deno job completed on same WebSocket")
+		case <-time.After(15 * time.Second):
+			t.Fatalf("next job wedged after cancellation: %s", string(log.Bytes()))
+		}
 	}
 	start := time.Now()
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
