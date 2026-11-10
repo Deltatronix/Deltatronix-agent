@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,4 +297,25 @@ func nativePayloadWire(t *testing.T, p *nativePayload) map[string]any {
 		delete(wire, "closureHash")
 	}
 	return wire
+}
+
+func TestNativePCBBoardLimitBeforeStaging(t *testing.T) {
+	for _, count := range []int{8, 9} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			p, _ := pcbFitWireFixture(t)
+			for i := 1; i < count; i++ {
+				capture := p.BoardCaptures[0]
+				capture.ReferenceID = "pcb-ref-" + strconv.Itoa(i)
+				p.BoardCaptures = append(p.BoardCaptures, capture)
+			}
+			p.ProofHash, _ = nativePCBProofHash(p)
+			err := validateNativePayload(p)
+			if count == 8 && err != nil {
+				t.Fatal(err)
+			}
+			if count == 9 && err == nil {
+				t.Fatal("nine captured boards reached staging despite eight-board policy")
+			}
+		})
+	}
 }

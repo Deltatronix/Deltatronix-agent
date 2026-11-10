@@ -39,7 +39,7 @@ func validateNativePCB(p *nativePayload) error {
 			return errors.New("unsupported native PCB policy")
 		}
 	}
-	if p.BoardCaptures == nil || len(p.BoardCaptures) > 256 || len(p.Assets) > 256 {
+	if p.BoardCaptures == nil || len(p.BoardCaptures) > int(nativeFitPolicy["maxBoards"]) || len(p.Assets) > 256 {
 		return errors.New("native PCB proof limit exceeded")
 	}
 	assets := map[string]int64{}
