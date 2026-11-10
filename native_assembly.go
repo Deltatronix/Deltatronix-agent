@@ -27,6 +27,9 @@ func nativeSourceMetadata(source nativeSourceDocument) map[string]any {
 }
 
 func validateNativeAssembly(p *nativePayload, total int64) error {
+	if len(p.Assets) > 256 {
+		return errors.New("native assembly asset limit exceeded")
+	}
 	if p.TargetKind != "assembly" || p.ConfigurationID != nil || !nativeIDPattern.MatchString(p.DocumentID) || !nativeIDPattern.MatchString(p.SnapshotID) || p.Version < 0 || p.SourceDocuments == nil || len(p.SourceDocuments) > 64 || !nativeHashPattern.MatchString(p.ClosureHash) {
 		return errors.New("invalid native assembly identity")
 	}

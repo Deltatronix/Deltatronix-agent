@@ -306,3 +306,29 @@ func TestNativeAssemblyNontrivialSharedOrdering(t *testing.T) {
 		t.Fatal("binary ordering differs from shared JS vector")
 	}
 }
+
+func TestNativeAssemblyFixedAssetBoundaryPreservesV1(t *testing.T) {
+	p, _ := assemblyWireFixture(t)
+	p.Assets = nil
+	for i := 0; i < 256; i++ {
+		p.Assets = append(p.Assets, nativeFile{Hash: fmt.Sprintf("%064x", i+1), Size: 1})
+	}
+	p.ClosureHash, _ = nativeAssemblyClosureHash(p)
+	if err := validateNativePayload(p); err != nil {
+		t.Fatal(err)
+	}
+	p.Assets = append(p.Assets, nativeFile{Hash: fmt.Sprintf("%064x", 257), Size: 1})
+	p.ClosureHash, _ = nativeAssemblyClosureHash(p)
+	if validateNativePayload(p) == nil {
+		t.Fatal("v2 accepted more than256 distinct closure assets")
+	}
+	p.ContractVersion = 1
+	p.TargetKind = ""
+	p.AssemblyLimits = nil
+	p.SourceDocuments = nil
+	p.ClosureHash = ""
+	p.Operation = json.RawMessage(`{"kind":"regenerate"}`)
+	if err := validateNativePayload(p); err != nil {
+		t.Fatalf("v1 local validation semantics changed: %v", err)
+	}
+}
