@@ -510,8 +510,7 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 	protocolError := make(chan error, 1)
 	nextJobID := jobID + "-next"
 	nextContainer := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(nextJobID))[:12]
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/document" {
 			w.Write(document)
 			return
@@ -537,7 +536,7 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 			return
 		}
 		defer conn.CloseNow()
-		p := map[string]any{"contractVersion": 1, "requestId": requestID, "documentId": "stop-document", "version": 1, "snapshotId": "stop-snapshot", "document": map[string]any{"hash": hashNative(document), "size": len(document), "url": server.URL + "/document"}, "assets": []any{}, "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "lease": map[string]any{"id": "stop-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}, "runtime": map[string]any{"artifactId": m.ArtifactID, "manifestUrl": "/compute/shape-runtime/" + m.ArtifactID + "/manifest"}}
+		p := map[string]any{"contractVersion": 1, "requestId": requestID, "documentId": "stop-document", "version": 1, "snapshotId": "stop-snapshot", "document": map[string]any{"hash": hashNative(document), "size": len(document), "url": "http://" + r.Host + "/document"}, "assets": []any{}, "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "lease": map[string]any{"id": "stop-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}, "runtime": map[string]any{"artifactId": m.ArtifactID, "manifestUrl": "/compute/shape-runtime/" + m.ArtifactID + "/manifest"}}
 		frame, _ := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": jobID, "payload": p})
 		if conn.Write(r.Context(), websocket.MessageText, frame) != nil {
 			return
