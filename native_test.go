@@ -482,11 +482,13 @@ const (
 	nativeCancelAndContinue
 	nativeComplete
 	nativeRefuse
+	nativeMalformedAndContinue
 )
 
 type nativePairedFixture struct {
 	Payload          nativePayload
 	Files            map[string][]byte
+	ExpectedFit      map[string]any
 	ExpectedAssembly map[string]any
 	ExpectedBomHash  string
 	ExpectedError    string
@@ -580,7 +582,15 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 		assignedJobID := jobID
 		sendAssign := func(id string) error {
 			assignedJobID = id
-			data, err := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": id, "payload": p})
+			var payload any = p
+			if scenario == nativeMalformedAndContinue && id == jobID {
+				data, _ := json.Marshal(p)
+				var malformed map[string]any
+				json.Unmarshal(data, &malformed)
+				malformed["unknownField"] = "https://secret.invalid/capture"
+				payload = malformed
+			}
+			data, err := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": id, "payload": payload})
 			if err != nil {
 				return err
 			}
@@ -618,9 +628,13 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 			if received["type"] != "job.result" {
 				continue
 			}
-			if scenario == nativeCancelAndContinue && received["jobId"] == jobID {
+			if (scenario == nativeCancelAndContinue || scenario == nativeMalformedAndContinue) && received["jobId"] == jobID {
 				if received["ok"] != false || received["leaseId"] != "stop-lease" {
 					protocolError <- fmt.Errorf("cancelled job emitted success/wrong lease: %v", received)
+					return
+				}
+				if scenario == nativeMalformedAndContinue && received["error"] != "Malformed PCB fit assignment" {
+					protocolError <- fmt.Errorf("malformed assignment leaked or lost generic refusal: %v", received)
 					return
 				}
 				out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name="+containerName).Output()
@@ -701,7 +715,7 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 				}
 			} else {
 				lease := "stop-lease"
-				if scenario == nativeCancelAndContinue {
+				if scenario == nativeCancelAndContinue || scenario == nativeMalformedAndContinue {
 					lease = "next-lease"
 				}
 				if frame["ok"] != true || frame["leaseId"] != lease {
@@ -720,6 +734,23 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 					assembly := summary["assembly"].(map[string]any)
 					if assembly["closureHash"] != fixture.Payload.ClosureHash || assembly["occurrenceCount"] != fixture.ExpectedAssembly["occurrenceCount"] || assembly["mateCount"] != fixture.ExpectedAssembly["mateCount"] || assembly["bomHash"] != fixture.ExpectedBomHash || result["output"] != nil {
 						t.Fatalf("assembly differs from independent fixture: %v", summary)
+					}
+				}
+				if fixture.ExpectedFit != nil {
+					summary, ok := result["summary"].(map[string]any)
+					if !ok {
+						t.Fatal("PCB summary missing")
+					}
+					fit, ok := summary["fit"].(map[string]any)
+					if !ok || fit["sourceProofHash"] != fixture.Payload.ProofHash || result["output"] != nil {
+						t.Fatal("PCB receipt lost proof identity or exported geometry")
+					}
+					for key, want := range fixture.ExpectedFit {
+						got, _ := canonicalNativeJSON(fit[key])
+						expected, _ := canonicalNativeJSON(want)
+						if string(got) != string(expected) {
+							t.Fatalf("independent PCB expectation %s: got %s want %s", key, got, expected)
+						}
 					}
 				}
 				t.Logf("real signed native v%d result accepted; scenario=%d", fixture.Payload.ContractVersion, scenario)
