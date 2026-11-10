@@ -6,6 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/coder/websocket"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -399,4 +401,145 @@ func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
 	if bad.write(data) == nil {
 		t.Fatal("unmeasured/wrong runtime starts work")
 	}
+}
+
+func TestNativeJobLaunchJoinWaitsForCleanup(t *testing.T) {
+	a := &agent{}
+	release := make(chan struct{})
+	cleaned := make(chan struct{})
+	a.launchJob(func() { <-release; close(cleaned) })
+	joined := make(chan struct{})
+	go func() { a.jobsWG.Wait(); close(joined) }()
+	select {
+	case <-joined:
+		t.Fatal("joined before job cleanup")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-joined:
+		select {
+		case <-cleaned:
+		default:
+			t.Fatal("cleanup incomplete")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("job did not join")
+	}
+}
+
+func TestNativeProcessStopCleansContainer(t *testing.T) {
+	if os.Getenv("DTX_NATIVE_STOP_CHILD") == "1" {
+		connectForever(Config{APIURL: os.Getenv("DTX_NATIVE_STOP_API"), AgentID: "native-stop-integration", AgentToken: "test-paired-token"})
+		return
+	}
+	release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME")
+	documentPath := os.Getenv("DTX_NATIVE_DOCUMENT")
+	if release == "" || documentPath == "" {
+		t.Skip("requires explicit signed runtime and document for process integration")
+	}
+	manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m nativeManifest
+	json.Unmarshal(manifest, &m)
+	document, err := os.ReadFile(documentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := fmt.Sprintf("stop-%d", time.Now().UnixNano())
+	requestID := "process-stop-request"
+	agentID := "native-stop-integration"
+	containerName := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(jobID))[:12]
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/document" {
+			w.Write(document)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			w.Write(manifest)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/archive") {
+			http.ServeFile(w, r, filepath.Join(release, "archive.tgz"))
+			return
+		}
+		if r.URL.Path != "/compute/ws" {
+			w.WriteHeader(404)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer test-paired-token" {
+			w.WriteHeader(401)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		p := map[string]any{"contractVersion": 1, "requestId": requestID, "documentId": "stop-document", "version": 1, "snapshotId": "stop-snapshot", "document": map[string]any{"hash": hashNative(document), "size": len(document), "url": server.URL + "/document"}, "assets": []any{}, "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "lease": map[string]any{"id": "stop-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}, "runtime": map[string]any{"artifactId": m.ArtifactID, "manifestUrl": "/compute/shape-runtime/" + m.ArtifactID + "/manifest"}}
+		frame, _ := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": jobID, "payload": p})
+		if conn.Write(r.Context(), websocket.MessageText, frame) != nil {
+			return
+		}
+		for {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestNativeProcessStopCleansContainer$", "-test.v")
+	cmd.Env = append(os.Environ(), "DTX_NATIVE_STOP_CHILD=1", "DTX_NATIVE_STOP_API="+server.URL)
+	log := &boundedNativeBuffer{max: 64 << 10, overflow: cancel}
+	cmd.Stdout = log
+	cmd.Stderr = log
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer func() { cancel(); _ = cmd.Process.Kill(); _ = removeNativeContainer(containerName) }()
+	deadline := time.Now().Add(12 * time.Second)
+	running := false
+	for time.Now().Before(deadline) {
+		out, _ := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", containerName).Output()
+		if strings.TrimSpace(string(out)) == "true" {
+			running = true
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("agent exited before native start: %v %s", err, string(log.Bytes()))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !running {
+		t.Fatalf("native container never started: %s", string(log.Bytes()))
+	}
+	start := time.Now()
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent stop: %v %s", err, string(log.Bytes()))
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("agent did not finish owned cleanup on interrupt")
+	}
+	out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name="+containerName).Output()
+	if err != nil || len(bytes.TrimSpace(out)) != 0 {
+		t.Fatalf("process stop left container: %s %v", out, err)
+	}
+	t.Logf("actual paired process interrupted and container removed in %s", time.Since(start))
 }

@@ -10,7 +10,10 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -48,7 +51,9 @@ func cmdRun(headless bool) error {
 // connectForever runs the connect loop until the process exits — the headless
 // entrypoint.
 func connectForever(cfg Config) {
-	connectLoop(context.Background(), cfg)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	connectLoop(ctx, cfg)
 }
 
 // connectLoop serves and reconnects with jittered backoff, broadcasting status
@@ -128,6 +133,7 @@ type agent struct {
 	conn *websocket.Conn
 	ctx  context.Context
 
+	jobsWG  sync.WaitGroup
 	writeMu sync.Mutex // serializes conn.Write (one writer at a time)
 
 	mu           sync.Mutex
@@ -165,6 +171,7 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 		log.Printf("native recovery unavailable: %v", recoveryErr)
 	}
 	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
+	defer func() { cancel(); a.jobsWG.Wait() }()
 	go a.reprobeLoop()
 
 	for {
@@ -213,7 +220,7 @@ func (a *agent) dispatch(data []byte) {
 		if err := json.Unmarshal(native.Payload, &p); err != nil {
 			return
 		}
-		go a.runNativeJob(native.JobID, &p)
+		a.launchJob(func() { a.runNativeJob(native.JobID, &p) })
 		return
 	}
 	switch routeFrame(f) {
@@ -222,7 +229,7 @@ func (a *agent) dispatch(data []byte) {
 	case kindCancel:
 		a.cancelJob(f.JobID)
 	case kindAssign:
-		go a.runJob(f.JobID, f.Payload)
+		a.launchJob(func() { a.runJob(f.JobID, f.Payload) })
 	default:
 		log.Printf("ignoring unknown frame type %q", f.Type)
 	}
@@ -400,3 +407,6 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
+
+// Register before scheduling so a disconnected reader can safely join every job.
+func (a *agent) launchJob(run func()) { a.jobsWG.Add(1); go func() { defer a.jobsWG.Done(); run() }() }

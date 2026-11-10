@@ -168,7 +168,12 @@ After adding the agent to PATH, you can use `dtx-agent` without the `./` prefix.
 
 ## Configuration
 
-The agent stores its settings in your user configuration folder:
+The agent stores its settings in your user configuration folder. Set
+`DTX_AGENT_CONFIG_DIR` to an absolute directory to use a separate pairing/profile
+without changing the desktop pairing. For clipboard-based pairing, pipe the
+code to `dtx-agent pair --code-stdin` so it does not appear in process arguments.
+
+Default locations:
 
 | Operating system | Default folder |
 | --- | --- |

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -14,12 +15,26 @@ type Config struct {
 	AgentToken string `json:"agentToken"`
 }
 
-func configPath() (string, error) {
+// A separate profile isolates QA pairing from an existing desktop connection.
+func agentConfigDir() (string, error) {
+	if dir := os.Getenv("DTX_AGENT_CONFIG_DIR"); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return "", errors.New("DTX_AGENT_CONFIG_DIR must be absolute")
+		}
+		return filepath.Clean(dir), nil
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "dtx-agent", "config.json"), nil
+	return filepath.Join(dir, "dtx-agent"), nil
+}
+func configPath() (string, error) {
+	dir, err := agentConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
 }
 
 func loadConfig() (Config, error) {

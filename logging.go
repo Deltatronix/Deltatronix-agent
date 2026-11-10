@@ -20,11 +20,11 @@ var (
 
 // defaultLogPath is <config dir>/dtx-agent.log, alongside config.json and llm.txt.
 func defaultLogPath() string {
-	dir, err := os.UserConfigDir()
+	dir, err := agentConfigDir()
 	if err != nil {
 		return "dtx-agent.log"
 	}
-	return filepath.Join(dir, "dtx-agent", "dtx-agent.log")
+	return filepath.Join(dir, "dtx-agent.log")
 }
 
 // logPath returns the log file the tray items should open. Falls back to the
