@@ -100,13 +100,19 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 		return nil, nil, receipt, fmt.Errorf("create native container: %w: %s", errors.Join(createErr, cleanupErr), out)
 	}
 	receipt["cleanupVerified"] = false
+	containerRemoved := false
 	defer func() {
 		if err == nil {
 			receipt, err = inspectNativeReceipt(name)
 		}
-		if cleanupErr := removeNativeContainer(name); cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-		} else {
+		if !containerRemoved {
+			if cleanupErr := removeNativeContainer(name); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			} else {
+				containerRemoved = true
+			}
+		}
+		if containerRemoved {
 			if receipt == nil {
 				receipt = map[string]any{}
 			}
@@ -151,6 +157,9 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 		case <-done:
 		case <-time.After(250 * time.Millisecond):
 			cleanupErr := removeNativeContainer(name)
+			if cleanupErr == nil {
+				containerRemoved = true
+			}
 			if cleanupErr != nil {
 				_ = cmd.Process.Kill()
 			}

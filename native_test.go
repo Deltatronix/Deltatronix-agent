@@ -149,9 +149,12 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(time.Second, cancel)
 	start := time.Now()
-	_, _, _, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request")
+	_, _, cancelledReceipt, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request")
 	if err == nil {
 		t.Fatal("blocking child succeeded")
+	}
+	if cancelledReceipt == nil || cancelledReceipt["cleanupVerified"] != true {
+		t.Fatal("hard kill removal was not retained as verified cleanup")
 	}
 	if time.Since(start) > 8*time.Second {
 		t.Fatal("blocking child was not bounded")
