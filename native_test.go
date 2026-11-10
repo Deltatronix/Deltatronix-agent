@@ -1,0 +1,295 @@
+package main
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestNativePolicyRejectsMissingOrChangedLimits(t *testing.T) {
+	p := nativePayload{ContractVersion: 1, RequestID: "request", DocumentID: "document", Document: nativeFile{Hash: strings.Repeat("a", 64), Size: 1}}
+	p.Lease.ID = "lease"
+	p.Lease.ExpiresAt = time.Now().Add(time.Minute).UnixMilli()
+	p.Runtime.ArtifactID = "release"
+	p.Limits = map[string]float64{}
+	for k, v := range nativePolicy {
+		p.Limits[k] = v
+	}
+	if err := validateNativePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	p.Limits["memoryBytes"]++
+	if validateNativePayload(&p) == nil {
+		t.Fatal("changed policy accepted")
+	}
+	delete(p.Limits, "memoryBytes")
+	if validateNativePayload(&p) == nil {
+		t.Fatal("missing limit accepted")
+	}
+}
+func TestNativeArtifactRejectsUnsignedManifest(t *testing.T) {
+	if _, err := verifyNativeManifest([]byte(`{"schemaVersion":1,"signature":{"algorithm":"ed25519","keyId":"shape-native-release-2026-11","valueBase64":"AAAA"}}`)); err == nil {
+		t.Fatal("invalid signature accepted")
+	}
+}
+func TestNativeArchiveRejectsTraversalAndSymlinks(t *testing.T) {
+	for _, h := range []*tar.Header{{Name: "../escape", Typeflag: tar.TypeReg, Mode: 0644}, {Name: "shape-native", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}} {
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		tw.Close()
+		gz.Close()
+		if unpackNativeArchive(b.Bytes(), t.TempDir()) == nil {
+			t.Fatal("unsafe archive accepted")
+		}
+	}
+}
+func TestNativeFetchBoundsAndDoesNotForwardBearer(t *testing.T) {
+	sink := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("bearer leaked")
+		}
+		w.Write([]byte("oversize"))
+	}))
+	defer sink.Close()
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = sink.Client().Transport
+	defer func() { http.DefaultTransport = oldTransport }()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer paired" {
+			t.Error("missing paired auth")
+		}
+		http.Redirect(w, r, sink.URL, http.StatusFound)
+	}))
+	defer origin.Close() // The sink uses a private test CA trusted only for this test.
+	if _, err := nativeFetch(context.Background(), origin.URL, "paired", 2); err == nil {
+		t.Fatal("oversize/untrusted response accepted")
+	}
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("123")) }))
+	defer direct.Close()
+	if _, err := nativeFetch(context.Background(), direct.URL, "", 2); err == nil {
+		t.Fatal("oversize accepted")
+	}
+}
+func TestNativeContainerHardBounds(t *testing.T) {
+	args := strings.Join(nativeContainerArgs("name", "/runtime", "/input", "/output"), " ")
+	for _, want := range []string{"--network none", "--read-only", "--user 65534:65534", "--cap-drop ALL", "--security-opt no-new-privileges", "--memory 1073741824", "--memory-swap 1073741824", "--cpus 1", "--pids-limit 64", "--entrypoint /runtime/shape-native", nativeImage} {
+		if !strings.Contains(args, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+}
+func TestNativeOutputRejectsWrongEvidenceAndChangedBytes(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"bodies":[]}`)
+	os.WriteFile(filepath.Join(dir, "result.json"), data, 0644)
+	p := &nativePayload{RequestID: "request"}
+	applied := map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}
+	lines := func() []byte {
+		a, _ := json.Marshal(map[string]any{"contractVersion": 1, "requestId": "request", "type": "limits", "applied": applied})
+		b, _ := json.Marshal(map[string]any{"contractVersion": 1, "requestId": "request", "type": "result", "result": map[string]any{"bodyCount": 0, "triangles": 0, "work": 0, "states": map[string]any{}, "resultHash": hashNative(data), "resultSize": len(data)}})
+		return append(append(a, '\n'), b...)
+	}
+	if _, err := verifyNativeOutput(lines(), p, dir); err != nil {
+		t.Fatal(err)
+	}
+	applied["runtime"] = "node"
+	if _, err := verifyNativeOutput(lines(), p, dir); err == nil {
+		t.Fatal("Node evidence accepted")
+	}
+	applied["runtime"] = "deno"
+	os.WriteFile(filepath.Join(dir, "result.json"), []byte("changed"), 0644)
+	if _, err := verifyNativeOutput(lines(), p, dir); err == nil {
+		t.Fatal("changed result accepted")
+	}
+}
+func TestNativeLeaseIgnoresOtherLeaseAndExpiry(t *testing.T) {
+	a := &agent{nativeLeases: map[string]nativeLease{"job": {ID: "current", ExpiresAt: time.Now().Add(time.Second)}}}
+	before := a.nativeLeases["job"].ExpiresAt
+	a.onNativeLease("job", "old", time.Now().Add(time.Minute).UnixMilli())
+	a.onNativeLease("job", "current", time.Now().Add(-time.Minute).UnixMilli())
+	if !a.nativeLeases["job"].ExpiresAt.Equal(before) {
+		t.Fatal("stale renewal changed lease")
+	}
+}
+
+// Explicit opt-in integration probe: a hostile child ignores stdin and blocks.
+// The normal companion entrypoint remains the signed Deno executable.
+func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
+	if os.Getenv("DTX_NATIVE_DOCKER_TEST") != "1" {
+		t.Skip("explicit local Docker integration probe")
+	}
+	root := t.TempDir()
+	os.Chmod(root, 0755)
+	runtimeDir := filepath.Join(root, "runtime")
+	input := filepath.Join(root, "input")
+	output := filepath.Join(root, "output")
+	for _, dir := range []string{runtimeDir, input, output} {
+		os.MkdirAll(dir, 0755)
+	}
+	binary := filepath.Join(runtimeDir, "shape-native")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nwhile :; do :; done\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Second, cancel)
+	start := time.Now()
+	_, _, _, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request")
+	if err == nil {
+		t.Fatal("blocking child succeeded")
+	}
+	if time.Since(start) > 8*time.Second {
+		t.Fatal("blocking child was not bounded")
+	}
+	if out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name=dtx-shape-test-blocking").Output(); err != nil || len(bytes.TrimSpace(out)) != 0 {
+		t.Fatalf("orphan container: %s %v", out, err)
+	}
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt["cleanupVerified"] != true {
+		t.Fatal("cleanup not verified")
+	}
+}
+
+func TestNativeGenuineDenoRuntime(t *testing.T) {
+	runtimeDir := os.Getenv("DTX_NATIVE_RUNTIME")
+	documentPath := os.Getenv("DTX_NATIVE_DOCUMENT")
+	if runtimeDir == "" || documentPath == "" {
+		t.Skip("requires explicit compiled Deno fixture paths")
+	}
+	data, err := os.ReadFile(documentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	os.Chmod(root, 0755)
+	input := filepath.Join(root, "input")
+	output := filepath.Join(root, "output")
+	os.MkdirAll(input, 0755)
+	os.MkdirAll(output, 0777)
+	os.Chmod(output, 0777)
+	os.WriteFile(filepath.Join(input, "document.json"), data, 0644)
+	p := &nativePayload{RequestID: "companion-real-deno"}
+	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": "companion-test", "version": 1}, "documentHash": hashNative(data), "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "assets": []any{}}
+	wire, _ := json.Marshal(job)
+	os.WriteFile(filepath.Join(input, "job.json"), wire, 0644)
+	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno", runtimeDir, input, output, p.RequestID)
+	if err != nil {
+		t.Fatalf("Deno run: %v stdout=%s stderr=%s", err, stdout, stderr)
+	}
+	summary, err := verifyNativeOutput(stdout, p, output)
+	if err != nil {
+		t.Fatalf("Deno output: %v stdout=%s stderr=%s", err, stdout, stderr)
+	}
+	t.Logf("genuine Deno summary=%v receipt=%v", summary, receipt)
+}
+
+func TestNativeDockerTouchedMemoryOOM(t *testing.T) {
+	if os.Getenv("DTX_NATIVE_DOCKER_TEST") != "1" {
+		t.Skip("explicit local Docker integration probe")
+	}
+	root := t.TempDir()
+	os.Chmod(root, 0755)
+	runtimeDir := filepath.Join(root, "runtime")
+	input := filepath.Join(root, "input")
+	output := filepath.Join(root, "output")
+	for _, dir := range []string{runtimeDir, input, output} {
+		os.MkdirAll(dir, 0755)
+	}
+	// An adversarial test executable touches real pages beyond the cgroup limit.
+	// It is deliberately not the production runtime or an execution fallback.
+	script := "#!/bin/sh\nexec /usr/local/bin/node --max-old-space-size=4096 -e 'globalThis.pages=Buffer.alloc(1536*1024*1024,1);setInterval(()=>{},1000)'\n"
+	if err := os.WriteFile(filepath.Join(runtimeDir, "shape-native"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	name := "dtx-shape-test-oom"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", nativeContainerArgs(name, runtimeDir, input, output)...).CombinedOutput(); err != nil {
+		t.Fatalf("create: %s %v", out, err)
+	}
+	defer removeNativeContainer(name)
+	if out, err := exec.CommandContext(ctx, "docker", "start", "--attach", name).CombinedOutput(); err == nil {
+		t.Fatalf("unbounded allocation succeeded: %s", out)
+	}
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer inspectCancel()
+	out, err := exec.CommandContext(inspectCtx, "docker", "inspect", "--format", "{{.State.OOMKilled}} {{.State.ExitCode}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.HostConfig.PidsLimit}} {{.HostConfig.NanoCpus}}", name).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "true 137 1073741824 1073741824 64 1000000000" {
+		t.Fatalf("missing actual OOM/limit evidence: %s", out)
+	}
+	t.Logf("actual touched-memory evidence: %s", out)
+}
+
+func TestNativeLeaseExpiresWithoutRenewal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &agent{nativeLeases: map[string]nativeLease{"job": {ID: "lease", ExpiresAt: time.Now().Add(30 * time.Millisecond)}}}
+	go a.renewNativeLease(ctx, "job", "lease", cancel)
+	select {
+	case <-ctx.Done():
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expired lease did not cancel promptly")
+	}
+}
+
+func TestNativeSignedRuntimeInstall(t *testing.T) {
+	dir := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME")
+	if dir == "" {
+		t.Skip("requires explicit signed release fixture")
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m nativeManifest
+	if err := json.Unmarshal(manifest, &m); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-paired-token" {
+			t.Error("missing paired auth")
+			w.WriteHeader(401)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/manifest") {
+			w.Write(manifest)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/archive") {
+			http.ServeFile(w, r, filepath.Join(dir, "archive.tgz"))
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+	p := &nativePayload{}
+	p.Runtime.ArtifactID = m.ArtifactID
+	p.Runtime.ManifestURL = "/compute/shape-runtime/" + m.ArtifactID + "/manifest"
+	dest := t.TempDir()
+	if err := installNativeRuntime(context.Background(), Config{APIURL: server.URL, AgentToken: "test-paired-token"}, p, dest); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("verified signed archive/executable/WASM: %s", m.ArtifactID)
+}

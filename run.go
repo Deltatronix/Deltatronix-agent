@@ -137,6 +137,9 @@ type agent struct {
 	lastCap      bool // last advertised llm.vision state
 	hintShown    bool
 	busy         bool
+	nativeLeases map[string]nativeLease
+	nativeCap    bool
+	nativeReady  bool
 	jobs         map[string]context.CancelFunc
 }
 
@@ -157,7 +160,11 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	log.Printf("connected")
 	setStatus("Connected")
 
-	a := &agent{cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
+	recoveryErr := reconcileNativeContainers(ctx, cfg.AgentID)
+	if recoveryErr != nil {
+		log.Printf("native recovery unavailable: %v", recoveryErr)
+	}
+	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, jobs: map[string]context.CancelFunc{}}
 	go a.reprobeLoop()
 
 	for {
@@ -186,6 +193,27 @@ func (a *agent) dispatch(data []byte) {
 	var f Frame
 	if err := json.Unmarshal(data, &f); err != nil {
 		log.Printf("bad frame: %v", err)
+		return
+	}
+	var native struct {
+		Type      string          `json:"type"`
+		JobType   string          `json:"jobType"`
+		JobID     string          `json:"jobId"`
+		LeaseID   string          `json:"leaseId"`
+		ExpiresAt int64           `json:"expiresAt"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	_ = json.Unmarshal(data, &native)
+	if native.Type == "job.lease" {
+		a.onNativeLease(native.JobID, native.LeaseID, native.ExpiresAt)
+		return
+	}
+	if native.Type == "SHAPE_NATIVE" || (native.Type == "job.assign" && native.JobType == "SHAPE_NATIVE") {
+		var p nativePayload
+		if err := json.Unmarshal(native.Payload, &p); err != nil {
+			return
+		}
+		go a.runNativeJob(native.JobID, &p)
 		return
 	}
 	switch routeFrame(f) {
@@ -236,6 +264,17 @@ func (a *agent) probeAndAdvertise() {
 	has := probeErr == nil && hasVisionModel(installed, models)
 
 	a.mu.Lock()
+	ready := a.nativeReady
+	busy := a.busy
+	a.mu.Unlock()
+	if !ready && !busy {
+		ready = reconcileNativeContainers(a.ctx, a.cfg.AgentID) == nil
+		a.mu.Lock()
+		a.nativeReady = ready
+		a.mu.Unlock()
+	}
+	nativeAvailable := ready && probeNativeContainer(a.ctx) == nil
+	a.mu.Lock()
 	if probeErr != nil && !a.hintShown {
 		printLLMHint(models)
 		a.hintShown = true
@@ -251,7 +290,8 @@ func (a *agent) probeAndAdvertise() {
 	default:
 		setStatus(statusNoVisionModel)
 	}
-	changed := !a.advertised || has != a.lastCap
+	changed := !a.advertised || has != a.lastCap || nativeAvailable != a.nativeCap
+	a.nativeCap = nativeAvailable
 	a.lastCap = has
 	a.advertised = true
 	a.mu.Unlock()
@@ -262,6 +302,9 @@ func (a *agent) probeAndAdvertise() {
 	caps := []string{}
 	if has {
 		caps = []string{"llm.vision"}
+	}
+	if nativeAvailable {
+		caps = append(caps, "shape.native.v1")
 	}
 	log.Printf("advertising capabilities: %v", caps)
 	a.send(map[string]any{"type": "capabilities", "capabilities": caps})
