@@ -247,7 +247,11 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 		fail(err)
 		return
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			cleanupVerified = false
+		}
+	}()
 	input := filepath.Join(dir, "input")
 	output := filepath.Join(dir, "output")
 	runtimeDir := filepath.Join(dir, "runtime")
