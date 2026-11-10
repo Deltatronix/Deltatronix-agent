@@ -218,6 +218,7 @@ func (a *agent) dispatch(data []byte) {
 	if native.Type == "SHAPE_NATIVE" || (native.Type == "job.assign" && native.JobType == "SHAPE_NATIVE") {
 		var p nativePayload
 		if err := json.Unmarshal(native.Payload, &p); err != nil {
+			a.rejectMalformedPCBJob(native.JobID, native.Payload)
 			return
 		}
 		a.launchJob(func() { a.runNativeJob(native.JobID, &p) })
@@ -311,7 +312,7 @@ func (a *agent) probeAndAdvertise() {
 		caps = []string{"llm.vision"}
 	}
 	if nativeAvailable {
-		caps = append(caps, "shape.native.v1", "shape.assembly.v1")
+		caps = append(caps, "shape.native.v1", "shape.assembly.v1", "shape.pcb-fit.v1")
 	}
 	log.Printf("advertising capabilities: %v", caps)
 	a.send(map[string]any{"type": "capabilities", "capabilities": caps})
