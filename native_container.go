@@ -80,7 +80,7 @@ func removeNativeContainer(name string) error {
 	return nil
 }
 
-func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputDir, requestID string) (stdout, stderr []byte, receipt map[string]any, err error) {
+func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputDir, requestID string, contractVersion int) (stdout, stderr []byte, receipt map[string]any, err error) {
 	receipt = map[string]any{"cleanupVerified": true}
 	for _, p := range []string{runtimeDir, inputDir, outputDir} {
 		if !filepath.IsAbs(p) || strings.Contains(p, ",") {
@@ -122,7 +122,7 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	work, cancel := context.WithCancel(ctx)
 	defer cancel()
 	running := make(chan struct{}, 1)
-	monitor := &nativeOutputMonitor{requestID: requestID, running: running}
+	monitor := &nativeOutputMonitor{contractVersion: contractVersion, requestID: requestID, running: running}
 	stdoutBuffer := &boundedNativeBuffer{max: 12 << 20, overflow: cancel, observe: monitor.write}
 	stderrBuffer := &boundedNativeBuffer{max: 64 << 10, overflow: cancel}
 	cmd := exec.Command("docker", "start", "--attach", "--interactive", name)
@@ -151,7 +151,7 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	exited, waitErr := waitNativeExecution(work, done, running, time.Until(startupDeadline), 60*time.Second)
 	err = waitErr
 	if !exited {
-		cancelFrame, _ := json.Marshal(map[string]any{"contractVersion": 1, "type": "cancel", "requestId": requestID})
+		cancelFrame, _ := json.Marshal(map[string]any{"contractVersion": contractVersion, "type": "cancel", "requestId": requestID})
 		_, _ = io.WriteString(stdin, string(cancelFrame)+"\n")
 		select {
 		case <-done:
@@ -311,13 +311,14 @@ func waitNativeExecution(ctx context.Context, done <-chan error, running <-chan 
 }
 
 type nativeOutputMonitor struct {
-	requestID string
-	running   chan<- struct{}
-	pending   []byte
-	limits    bool
-	booting   bool
-	started   bool
-	terminal  bool
+	contractVersion int
+	requestID       string
+	running         chan<- struct{}
+	pending         []byte
+	limits          bool
+	booting         bool
+	started         bool
+	terminal        bool
 }
 
 func (m *nativeOutputMonitor) write(p []byte) error {
@@ -345,7 +346,7 @@ func (m *nativeOutputMonitor) write(p []byte) error {
 		if err := json.Unmarshal(line, &f); err != nil {
 			return errors.New("invalid native JSONL")
 		}
-		if f.ContractVersion != 1 || f.RequestID != m.requestID || m.terminal {
+		if f.ContractVersion != m.contractVersion || f.RequestID != m.requestID || m.terminal {
 			return errors.New("native output identity/order mismatch")
 		}
 		switch f.Type {

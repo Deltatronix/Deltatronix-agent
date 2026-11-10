@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -98,7 +99,7 @@ func TestNativeOutputRejectsWrongEvidenceAndChangedBytes(t *testing.T) {
 	dir := t.TempDir()
 	data := []byte(`{"bodies":[]}`)
 	os.WriteFile(filepath.Join(dir, "result.json"), data, 0644)
-	p := &nativePayload{RequestID: "request"}
+	p := &nativePayload{ContractVersion: 1, RequestID: "request"}
 	applied := map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}
 	lines := func() []byte {
 		a, _ := json.Marshal(map[string]any{"contractVersion": 1, "requestId": "request", "type": "limits", "applied": applied})
@@ -149,7 +150,7 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(time.Second, cancel)
 	start := time.Now()
-	_, _, cancelledReceipt, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request")
+	_, _, cancelledReceipt, err := runNativeContainer(ctx, "dtx-shape-test-blocking", runtimeDir, input, output, "request", 1)
 	if err == nil {
 		t.Fatal("blocking child succeeded")
 	}
@@ -166,7 +167,7 @@ func TestNativeDockerBlockingChildKilledAndNextJobRuns(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nwhile [ ! -f /input/controls.json ]; do sleep 0.01; done\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request")
+	_, _, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-next", runtimeDir, input, output, "request", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,20 +194,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	if runtimeDir == "" || documentPath == "" {
 		t.Skip("requires explicit compiled Deno fixture paths")
 	}
-	if release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME"); release != "" {
-		manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var m nativeManifest
-		if err := json.Unmarshal(manifest, &m); err != nil {
-			t.Fatal(err)
-		}
-		binary, err := os.ReadFile(filepath.Join(runtimeDir, "shape-native"))
-		if err != nil || hashNative(binary) != m.Executable.SHA256 {
-			t.Fatal("executed runtime differs from signed release")
-		}
-	}
+	requireNativeRuntimeRelease(t, runtimeDir)
 	data, err := os.ReadFile(documentPath)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +206,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	os.MkdirAll(output, 0777)
 	os.Chmod(output, 0777)
 	os.WriteFile(filepath.Join(input, "document.json"), data, 0644)
-	p := &nativePayload{RequestID: "companion-real-deno-" + operation}
+	p := &nativePayload{ContractVersion: 1, RequestID: "companion-real-deno-" + operation}
 	op := map[string]any{"kind": "regenerate"}
 	if operation != "regenerate" {
 		op = map[string]any{"kind": "export", "format": operation, "qualityScale": 1}
@@ -226,7 +214,7 @@ func runGenuineNativeFixture(t *testing.T, documentPath, operation string) {
 	job := map[string]any{"contractVersion": 1, "identity": map[string]any{"requestId": p.RequestID, "documentId": "companion-test", "version": 1}, "documentHash": hashNative(data), "configurationId": nil, "operation": op, "limits": nativePolicy, "assets": []any{}}
 	wire, _ := json.Marshal(job)
 	os.WriteFile(filepath.Join(input, "job.json"), wire, 0644)
-	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno-"+operation, runtimeDir, input, output, p.RequestID)
+	stdout, stderr, receipt, err := runNativeContainer(context.Background(), "dtx-shape-test-deno-"+operation, runtimeDir, input, output, p.RequestID, 1)
 	if err != nil {
 		t.Fatalf("Deno run: %v stdout=%s stderr=%s", err, stdout, stderr)
 	}
@@ -381,7 +369,7 @@ func TestNativeStartupAndWorkDeadlines(t *testing.T) {
 }
 func TestNativeStreamingRejectsResultBeforeRunningAndLateFrames(t *testing.T) {
 	for _, frames := range [][]string{{`{"type":"result"}`}, {`{"type":"limits"}`, `{"type":"limits"}`}, {`{"type":"limits"}`, `{"type":"phase","phase":"booting"}`, `{"type":"phase","phase":"running"}`, `{"type":"result"}`, `{"type":"phase","phase":"exporting"}`}} {
-		m := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+		m := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: make(chan struct{}, 1)}
 		var err error
 		for _, frame := range frames {
 			var f map[string]any
@@ -429,7 +417,7 @@ func TestNativeMeasuredCgroupControls(t *testing.T) {
 
 func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
 	running := make(chan struct{}, 1)
-	m := &nativeOutputMonitor{requestID: "request", running: running}
+	m := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: running}
 	frames := []map[string]any{{"type": "limits", "applied": map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}}, {"type": "phase", "phase": "booting"}, {"type": "phase", "phase": "running"}, {"type": "result"}}
 	for _, frame := range frames {
 		frame["contractVersion"] = 1
@@ -444,7 +432,7 @@ func TestNativeStreamingValidatesLimitsBeforeStartingWork(t *testing.T) {
 	default:
 		t.Fatal("work clock never started")
 	}
-	bad := &nativeOutputMonitor{requestID: "request", running: make(chan struct{}, 1)}
+	bad := &nativeOutputMonitor{contractVersion: 1, requestID: "request", running: make(chan struct{}, 1)}
 	data := []byte(`{"contractVersion":1,"requestId":"request","type":"limits","applied":{"runtime":"node"}}` + "\n")
 	if bad.write(data) == nil {
 		t.Fatal("unmeasured/wrong runtime starts work")
@@ -481,38 +469,72 @@ func TestNativeProcessStopCleansContainer(t *testing.T) {
 		connectForever(Config{APIURL: os.Getenv("DTX_NATIVE_STOP_API"), AgentID: "native-stop-integration", AgentToken: "test-paired-token"})
 		return
 	}
-	runNativePairedProcess(t, false)
+	runNativePairedFixture(t, loadPairedPartFixture(t), nativeProcessStop)
 }
-func TestNativeCancelThenNextJobSameConnection(t *testing.T) { runNativePairedProcess(t, true) }
-func runNativePairedProcess(t *testing.T, cancelFirst bool) {
+func TestNativeCancelThenNextJobSameConnection(t *testing.T) {
+	runNativePairedFixture(t, loadPairedPartFixture(t), nativeCancelAndContinue)
+}
+
+type nativePairedScenario int
+
+const (
+	nativeProcessStop nativePairedScenario = iota
+	nativeCancelAndContinue
+	nativeComplete
+	nativeRefuse
+)
+
+type nativePairedFixture struct {
+	Payload          nativePayload
+	Files            map[string][]byte
+	ExpectedAssembly map[string]any
+	ExpectedBomHash  string
+	ExpectedError    string
+}
+
+func loadPairedPartFixture(t *testing.T) nativePairedFixture {
+	t.Helper()
+	path := os.Getenv("DTX_NATIVE_DOCUMENT")
+	if path == "" {
+		t.Skip("requires explicit native document")
+	}
+	document, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := nativePayload{ContractVersion: 1, RequestID: "process-stop-request", DocumentID: "stop-document", Version: 1, SnapshotID: "stop-snapshot", Document: nativeFile{Hash: hashNative(document), Size: int64(len(document))}, Assets: []nativeFile{}, Operation: json.RawMessage(`{"kind":"regenerate"}`), Limits: nativePolicy}
+	return nativePairedFixture{Payload: p, Files: map[string][]byte{"/document": document}}
+}
+
+func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario nativePairedScenario) {
 	t.Helper()
 	release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME")
-	documentPath := os.Getenv("DTX_NATIVE_DOCUMENT")
-	if release == "" || documentPath == "" {
-		t.Skip("requires explicit signed runtime and document for process integration")
+	if release == "" {
+		t.Skip("requires explicit signed release for process integration")
 	}
 	manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var m nativeManifest
-	json.Unmarshal(manifest, &m)
-	document, err := os.ReadFile(documentPath)
-	if err != nil {
+	if err := json.Unmarshal(manifest, &m); err != nil {
 		t.Fatal(err)
 	}
-	jobID := fmt.Sprintf("stop-%d", time.Now().UnixNano())
-	requestID := "process-stop-request"
+	jobID := fmt.Sprintf("process-%d", time.Now().UnixNano())
+	nextJobID := jobID + "-next"
 	agentID := "native-stop-integration"
 	containerName := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(jobID))[:12]
-	cancelNow := make(chan struct{})
-	nextResult := make(chan map[string]any, 1)
-	protocolError := make(chan error, 1)
-	nextJobID := jobID + "-next"
 	nextContainer := "dtx-shape-" + hashNative([]byte(agentID))[:12] + "-" + hashNative([]byte(nextJobID))[:12]
+	cancelNow := make(chan struct{})
+	results := make(chan map[string]any, 2)
+	protocolError := make(chan error, 1)
+	var sourceRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/document" {
-			w.Write(document)
+		if data, ok := fixture.Files[r.URL.Path]; ok {
+			if strings.HasPrefix(r.URL.Path, "/sources/") {
+				sourceRequests.Add(1)
+			}
+			w.Write(data)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/manifest") {
@@ -536,12 +558,38 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 			return
 		}
 		defer conn.CloseNow()
-		p := map[string]any{"contractVersion": 1, "requestId": requestID, "documentId": "stop-document", "version": 1, "snapshotId": "stop-snapshot", "document": map[string]any{"hash": hashNative(document), "size": len(document), "url": "http://" + r.Host + "/document"}, "assets": []any{}, "configurationId": nil, "operation": map[string]any{"kind": "regenerate"}, "limits": nativePolicy, "lease": map[string]any{"id": "stop-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}, "runtime": map[string]any{"artifactId": m.ArtifactID, "manifestUrl": "/compute/shape-runtime/" + m.ArtifactID + "/manifest"}}
-		frame, _ := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": jobID, "payload": p})
-		if conn.Write(r.Context(), websocket.MessageText, frame) != nil {
+		p := fixture.Payload
+		p.RequestID = "process-request"
+		p.Document.URL = "http://" + r.Host + "/document"
+		p.SourceDocuments = append([]nativeSourceDocument(nil), fixture.Payload.SourceDocuments...)
+		if fixture.Payload.SourceDocuments != nil && p.SourceDocuments == nil {
+			p.SourceDocuments = []nativeSourceDocument{}
+		}
+		for i := range p.SourceDocuments {
+			p.SourceDocuments[i].Document.URL = "http://" + r.Host + "/sources/" + p.SourceDocuments[i].Document.Hash
+		}
+		p.Assets = make([]nativeFile, len(fixture.Payload.Assets))
+		copy(p.Assets, fixture.Payload.Assets)
+		for i := range p.Assets {
+			p.Assets[i].URL = "http://" + r.Host + "/assets/" + p.Assets[i].Hash
+		}
+		p.Lease.ID = "stop-lease"
+		p.Lease.ExpiresAt = time.Now().Add(10 * time.Second).UnixMilli()
+		p.Runtime.ArtifactID = m.ArtifactID
+		p.Runtime.ManifestURL = "/compute/shape-runtime/" + m.ArtifactID + "/manifest"
+		assignedJobID := jobID
+		sendAssign := func(id string) error {
+			assignedJobID = id
+			data, err := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": id, "payload": p})
+			if err != nil {
+				return err
+			}
+			return conn.Write(r.Context(), websocket.MessageText, data)
+		}
+		if sendAssign(jobID) != nil {
 			return
 		}
-		if cancelFirst {
+		if scenario == nativeCancelAndContinue {
 			go func() {
 				select {
 				case <-cancelNow:
@@ -557,10 +605,20 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 				return
 			}
 			var received map[string]any
-			if json.Unmarshal(data, &received) != nil || received["type"] != "job.result" {
+			if json.Unmarshal(data, &received) != nil {
 				continue
 			}
-			if cancelFirst && received["jobId"] == jobID {
+			if received["type"] == "job.renew" && received["jobId"] == assignedJobID && received["leaseId"] == p.Lease.ID {
+				renewal, _ := json.Marshal(map[string]any{"type": "job.lease", "jobId": assignedJobID, "leaseId": p.Lease.ID, "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()})
+				if conn.Write(r.Context(), websocket.MessageText, renewal) != nil {
+					return
+				}
+				continue
+			}
+			if received["type"] != "job.result" {
+				continue
+			}
+			if scenario == nativeCancelAndContinue && received["jobId"] == jobID {
 				if received["ok"] != false || received["leaseId"] != "stop-lease" {
 					protocolError <- fmt.Errorf("cancelled job emitted success/wrong lease: %v", received)
 					return
@@ -570,14 +628,14 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 					protocolError <- fmt.Errorf("acknowledged before container cleanup: %s %v", out, err)
 					return
 				}
-				p["requestId"] = requestID + "-next"
-				p["lease"] = map[string]any{"id": "next-lease", "expiresAt": time.Now().Add(10 * time.Second).UnixMilli()}
-				next, _ := json.Marshal(map[string]any{"type": "job.assign", "jobType": "SHAPE_NATIVE", "jobId": nextJobID, "payload": p})
-				if conn.Write(r.Context(), websocket.MessageText, next) != nil {
+				p.RequestID = "next-request"
+				p.Lease.ID = "next-lease"
+				p.Lease.ExpiresAt = time.Now().Add(10 * time.Second).UnixMilli()
+				if sendAssign(nextJobID) != nil {
 					return
 				}
-			} else if cancelFirst && received["jobId"] == nextJobID {
-				nextResult <- received
+			} else {
+				results <- received
 			}
 		}
 	}))
@@ -586,7 +644,7 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestNativeProcessStopCleansContainer$", "-test.v")
 	cmd.Env = append(os.Environ(), "DTX_NATIVE_STOP_CHILD=1", "DTX_NATIVE_STOP_API="+server.URL)
@@ -602,47 +660,87 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 		cancel()
 		_ = cmd.Process.Kill()
 		_ = removeNativeContainer(containerName)
-		if cancelFirst {
-			_ = removeNativeContainer(nextContainer)
-		}
+		_ = removeNativeContainer(nextContainer)
 	}()
-	deadline := time.Now().Add(12 * time.Second)
-	running := false
-	for time.Now().Before(deadline) {
-		out, _ := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", containerName).Output()
-		if strings.TrimSpace(string(out)) == "true" {
-			running = true
-			break
+	if scenario == nativeProcessStop || scenario == nativeCancelAndContinue {
+		deadline := time.Now().Add(20 * time.Second)
+		running := false
+		for time.Now().Before(deadline) {
+			out, _ := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", containerName).Output()
+			if strings.TrimSpace(string(out)) == "true" {
+				running = true
+				break
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("agent exited before native start: %v %s", err, string(log.Bytes()))
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
-		select {
-		case err := <-done:
-			t.Fatalf("agent exited before native start: %v %s", err, string(log.Bytes()))
-		case <-time.After(10 * time.Millisecond):
+		if !running {
+			t.Fatalf("native container never started: %s", string(log.Bytes()))
+		}
+		if scenario == nativeCancelAndContinue {
+			close(cancelNow)
 		}
 	}
-	if !running {
-		t.Fatalf("native container never started: %s", string(log.Bytes()))
-	}
-	if cancelFirst {
-		close(cancelNow)
+	if scenario != nativeProcessStop {
 		select {
 		case err := <-protocolError:
 			t.Fatal(err)
-		case frame := <-nextResult:
-			if frame["ok"] != true || frame["leaseId"] != "next-lease" {
-				t.Fatalf("next job failed after cancellation: %v child=%s", frame, string(log.Bytes()))
+		case frame := <-results:
+			if scenario == nativeRefuse {
+				if frame["ok"] != false {
+					t.Fatalf("invalid source was accepted: %v", frame)
+				}
+				if fixture.ExpectedError != "" {
+					message, ok := frame["error"].(string)
+					if !ok || !strings.Contains(message, fixture.ExpectedError) {
+						t.Fatalf("wrong refusal boundary: %v", frame)
+					}
+				}
+			} else {
+				lease := "stop-lease"
+				if scenario == nativeCancelAndContinue {
+					lease = "next-lease"
+				}
+				if frame["ok"] != true || frame["leaseId"] != lease {
+					t.Fatalf("native job failed: %v child=%s", frame, string(log.Bytes()))
+				}
+				result, ok := frame["result"].(map[string]any)
+				if !ok {
+					t.Fatal("result missing")
+				}
+				receipt, ok := result["receipt"].(map[string]any)
+				if !ok || receipt["cleanupVerified"] != true || receipt["artifactId"] != m.ArtifactID {
+					t.Fatal("result lost cleanup/runtime identity")
+				}
+				if fixture.ExpectedAssembly != nil {
+					summary := result["summary"].(map[string]any)
+					assembly := summary["assembly"].(map[string]any)
+					if assembly["closureHash"] != fixture.Payload.ClosureHash || assembly["occurrenceCount"] != fixture.ExpectedAssembly["occurrenceCount"] || assembly["mateCount"] != fixture.ExpectedAssembly["mateCount"] || assembly["bomHash"] != fixture.ExpectedBomHash || result["output"] != nil {
+						t.Fatalf("assembly differs from independent fixture: %v", summary)
+					}
+				}
+				t.Logf("real signed native v%d result accepted; scenario=%d", fixture.Payload.ContractVersion, scenario)
 			}
-			result, ok := frame["result"].(map[string]any)
-			if !ok {
-				t.Fatal("next job result missing")
+		case <-time.After(30 * time.Second):
+			t.Fatalf("native job result missing: %s", string(log.Bytes()))
+		}
+	}
+	if scenario != nativeRefuse {
+		unique := 0
+		for path := range fixture.Files {
+			if strings.HasPrefix(path, "/sources/") {
+				unique++
 			}
-			receipt, ok := result["receipt"].(map[string]any)
-			if !ok || receipt["cleanupVerified"] != true || receipt["artifactId"] != m.ArtifactID {
-				t.Fatal("next job receipt missing cleanup/runtime identity")
-			}
-			t.Log("cancel failure acknowledged after removal; next real signed Deno job completed on same WebSocket")
-		case <-time.After(15 * time.Second):
-			t.Fatalf("next job wedged after cancellation: %s", string(log.Bytes()))
+		}
+		jobs := 1
+		if scenario == nativeCancelAndContinue {
+			jobs = 2
+		}
+		if sourceRequests.Load() != int32(unique*jobs) {
+			t.Fatalf("source staging did not deduplicate exact byte hashes: %d requests", sourceRequests.Load())
 		}
 	}
 	start := time.Now()
@@ -657,9 +755,59 @@ func runNativePairedProcess(t *testing.T, cancelFirst bool) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("agent did not finish owned cleanup on interrupt")
 	}
-	out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name="+containerName).Output()
-	if err != nil || len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("process stop left container: %s %v", out, err)
+	for _, name := range []string{containerName, nextContainer} {
+		out, err := exec.Command("docker", "ps", "--all", "--quiet", "--filter", "name="+name).Output()
+		if err != nil || len(bytes.TrimSpace(out)) != 0 {
+			t.Fatalf("native process left container: %s %v", out, err)
+		}
 	}
-	t.Logf("actual paired process interrupted and container removed in %s", time.Since(start))
+	t.Logf("actual paired process interrupted and owned containers removed in %s", time.Since(start))
+}
+
+func TestNativeAssemblyStreamingKeepsJobVersionsSeparate(t *testing.T) {
+	running := make(chan struct{}, 1)
+	monitor := &nativeOutputMonitor{contractVersion: 2, requestID: "assembly-request", running: running}
+	applied := map[string]any{"memoryBytes": 1 << 30, "swapBytes": 0, "pids": 64, "cpuQuota": 1, "runtime": "deno", "runtimeVersion": "2.9.8"}
+	frames := []map[string]any{{"type": "limits", "applied": applied}, {"type": "phase", "phase": "booting"}, {"type": "phase", "phase": "running"}, {"type": "result"}}
+	for _, frame := range frames {
+		frame["contractVersion"] = 2
+		frame["requestId"] = "assembly-request"
+		data, _ := json.Marshal(frame)
+		if err := monitor.write(append(data, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-running:
+	default:
+		t.Fatal("assembly never reached running")
+	}
+	old := &nativeOutputMonitor{contractVersion: 1, requestID: "assembly-request", running: make(chan struct{}, 1)}
+	data, _ := json.Marshal(map[string]any{"contractVersion": 2, "requestId": "assembly-request", "type": "limits", "applied": applied})
+	if old.write(append(data, '\n')) == nil {
+		t.Fatal("v1 monitor accepted v2 child")
+	}
+	newJob := &nativeOutputMonitor{contractVersion: 2, requestID: "assembly-request", running: make(chan struct{}, 1)}
+	data, _ = json.Marshal(map[string]any{"contractVersion": 1, "requestId": "assembly-request", "type": "limits", "applied": applied})
+	if newJob.write(append(data, '\n')) == nil {
+		t.Fatal("v2 monitor accepted v1 child")
+	}
+}
+
+func requireNativeRuntimeRelease(t *testing.T, runtimeDir string) {
+	t.Helper()
+	if release := os.Getenv("DTX_NATIVE_SIGNED_RUNTIME"); release != "" {
+		manifest, err := os.ReadFile(filepath.Join(release, "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m nativeManifest
+		if err := json.Unmarshal(manifest, &m); err != nil {
+			t.Fatal(err)
+		}
+		binary, err := os.ReadFile(filepath.Join(runtimeDir, "shape-native"))
+		if err != nil || hashNative(binary) != m.Executable.SHA256 {
+			t.Fatal("executed runtime differs from signed release")
+		}
+	}
 }

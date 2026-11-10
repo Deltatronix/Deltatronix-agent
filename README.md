@@ -140,6 +140,11 @@ native work while vision capabilities continue independently.
 Regeneration returns a verification receipt for the saved document version.
 Exports upload real project files through the server's normal storage path.
 
+Assembly verification uses each saved source version and configuration, even
+when newer versions exist. Missing or inaccessible pinned sources require an
+explicit fix; verification never advances sources automatically or saves derived
+poses into the assembly. Part regeneration and STEP/STL exports remain available.
+
 ## Everyday use
 
 - **Open the desktop app:** run `./dtx-agent`.
