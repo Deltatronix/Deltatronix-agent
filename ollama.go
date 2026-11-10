@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -56,9 +55,6 @@ func probeModelsAt(ctx context.Context, base string, client *http.Client) ([]str
 	}
 	if err := checkChatJSON(data); err != nil {
 		return nil, errors.New("invalid model listing JSON")
-	}
-	if err := checkChatMemberNames(data, reflect.TypeOf(body)); err != nil {
-		return nil, err
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
 		return nil, err
@@ -278,11 +274,11 @@ func printLLMHint(acceptable []string) {
 var defaultLLMTxt string
 
 func llmConfigPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := agentConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "dtx-agent", "llm.txt"), nil
+	return filepath.Join(dir, "llm.txt"), nil
 }
 
 // LLMSettings is the parsed backend, explicit chat selection and logging config.

@@ -10,9 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -147,9 +145,6 @@ func decodeChatJSON(data []byte, v any) error {
 	if err := checkChatJSON(data); err != nil {
 		return err
 	}
-	if err := checkChatMemberNames(data, reflect.TypeOf(v)); err != nil {
-		return err
-	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
@@ -162,126 +157,10 @@ func decodeChatJSON(data []byte, v any) error {
 	return nil
 }
 
-// Reject aliases of typed JSON members before Go's case-insensitive decoder.
-// Map keys remain arbitrary and case-sensitive; unknown fields are decoder policy.
-func checkChatMemberNames(data json.RawMessage, typ reflect.Type) error {
-	for typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	if typ == reflect.TypeFor[json.RawMessage]() {
-		return nil
-	}
-	switch typ.Kind() {
-	case reflect.Struct:
-		var members map[string]json.RawMessage
-		if json.Unmarshal(data, &members) != nil {
-			return nil
-		}
-		fields := make(map[string]reflect.Type, typ.NumField())
-		for i := 0; i < typ.NumField(); i++ {
-			field := typ.Field(i)
-			if field.PkgPath != "" {
-				continue
-			}
-			name := strings.SplitN(field.Tag.Get("json"), ",", 2)[0]
-			if name == "-" {
-				continue
-			}
-			if name == "" {
-				name = field.Name
-			}
-			fields[name] = field.Type
-		}
-		for name, value := range members {
-			field, ok := fields[name]
-			if !ok {
-				for expected := range fields {
-					if strings.EqualFold(name, expected) {
-						return errors.New("JSON member names must match exactly")
-					}
-				}
-				continue
-			}
-			if err := checkChatMemberNames(value, field); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		var members map[string]json.RawMessage
-		if json.Unmarshal(data, &members) != nil {
-			return nil
-		}
-		for _, value := range members {
-			if err := checkChatMemberNames(value, typ.Elem()); err != nil {
-				return err
-			}
-		}
-	case reflect.Slice, reflect.Array:
-		var elements []json.RawMessage
-		if json.Unmarshal(data, &elements) != nil {
-			return nil
-		}
-		for _, value := range elements {
-			if err := checkChatMemberNames(value, typ.Elem()); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// Check escapes before encoding/json can replace unmatched UTF-16 surrogates.
-// JSON syntax remains the decoder's responsibility.
-func checkChatUnicodeEscapes(data []byte) error {
-	inString := false
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
-		case '"':
-			inString = !inString
-		case '\\':
-			if !inString {
-				continue
-			}
-			i++ // Skip escaped quotes/backslashes as well as ordinary escapes.
-			if i >= len(data) {
-				return errors.New("incomplete JSON escape")
-			}
-			if data[i] != 'u' {
-				continue
-			}
-			if i+4 >= len(data) {
-				return errors.New("incomplete Unicode escape")
-			}
-			unit, err := strconv.ParseUint(string(data[i+1:i+5]), 16, 16)
-			if err != nil {
-				return errors.New("invalid Unicode escape")
-			}
-			i += 4
-			if unit >= 0xdc00 && unit <= 0xdfff {
-				return errors.New("unmatched low surrogate")
-			}
-			if unit >= 0xd800 && unit <= 0xdbff {
-				if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
-					return errors.New("unmatched high surrogate")
-				}
-				low, err := strconv.ParseUint(string(data[i+3:i+7]), 16, 16)
-				if err != nil || low < 0xdc00 || low > 0xdfff {
-					return errors.New("unmatched high surrogate")
-				}
-				i += 6
-			}
-		}
-	}
-	return nil
-}
-
 // encoding/json otherwise accepts duplicate members and replaces invalid text.
 func checkChatJSON(data []byte) error {
 	if !utf8.Valid(data) {
 		return errors.New("invalid UTF-8")
-	}
-	if err := checkChatUnicodeEscapes(data); err != nil {
-		return err
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
@@ -353,7 +232,10 @@ func validateChatPayload(p chatPayload, contextTokens int) error {
 		if tool.Type != "function" || !tool.Function.Strict || !validToolName(tool.Function.Name) || names[tool.Function.Name] || len(tool.Function.Description) > 2048 {
 			return bad
 		}
-		if _, ok := parseChatToolSchema(tool.Function.Parameters); !ok {
+		// Parameters pass through untouched; the browser runtime owns argument
+		// validation and returns a recoverable refusal to the model.
+		var params map[string]json.RawMessage
+		if json.Unmarshal(tool.Function.Parameters, &params) != nil || params == nil {
 			return bad
 		}
 		names[tool.Function.Name] = true
@@ -416,11 +298,14 @@ func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (json.RawM
 		return nil, err
 	}
 	var result chatCompletion
-	if checkChatJSON(body) != nil || checkChatMemberNames(body, reflect.TypeFor[chatCompletion]()) != nil || json.Unmarshal(body, &result) != nil || result.Model != p.Model || len(result.Choices) != 1 || result.Choices[0].Index != 0 {
+	if checkChatJSON(body) != nil || json.Unmarshal(body, &result) != nil || result.Model != p.Model || len(result.Choices) != 1 || result.Choices[0].Index != 0 {
 		return nil, errors.New("CHAT_INVALID_RESPONSE: expected one completion from the selected model")
 	}
 	choice := result.Choices[0]
-	if choice.Message.Role != "assistant" || !slices.Contains([]string{"stop", "tool_calls", "length"}, choice.FinishReason) || len(choice.Message.ToolCalls) > 8 || len(choice.Message.Content) > 16<<10 {
+	if choice.FinishReason == "length" {
+		return nil, errors.New("CHAT_TRUNCATED: the local model hit maxTokens before finishing")
+	}
+	if choice.Message.Role != "assistant" || !slices.Contains([]string{"stop", "tool_calls"}, choice.FinishReason) || len(choice.Message.ToolCalls) > 8 || len(choice.Message.Content) > 16<<10 {
 		return nil, errors.New("CHAT_INVALID_RESPONSE")
 	}
 	var text string
@@ -465,4 +350,29 @@ func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) bool
 		OK bool `json:"ok"`
 	}
 	return call.Function.Name == "dtx_probe" && decodeChatJSON([]byte(call.Function.Arguments), &args) == nil && args.OK
+}
+
+func validToolName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// A call must name an advertised tool and carry a JSON object of at most 8 KiB.
+// Argument types are the browser runtime's to check.
+func validChatCall(call chatToolCall, tools []chatTool) bool {
+	if call.Type != "function" || !validChatName(call.ID, 128) || len(call.Function.Arguments) > 8192 {
+		return false
+	}
+	var args map[string]json.RawMessage
+	if decodeChatJSON([]byte(call.Function.Arguments), &args) != nil || args == nil {
+		return false
+	}
+	return slices.ContainsFunc(tools, func(tool chatTool) bool { return tool.Function.Name == call.Function.Name })
 }

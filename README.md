@@ -111,6 +111,40 @@ models in its logs. Install a model requested by the agent; with Ollama, use
 Keep the model server and agent running while you use local AI features in
 Deltatronix. The agent retries automatically if a connection is interrupted.
 
+## Local Shape execution
+
+The same paired agent can run bounded Shape regeneration and STEP/STL exports
+without a model server. This first native runtime supports Docker Linux arm64
+with cgroup v2 (including Docker Desktop on Apple Silicon). Install Docker and
+pull the pinned base image once:
+
+```sh
+docker pull node@sha256:78bc820a7a6148e8c48731eca18dbb9b6b2c05ac4a52138479be565f2831682d
+```
+
+Pair and run the agent normally. It advertises `shape.native.v1` when the local
+containment prerequisites pass. The server selects the runtime release; the agent
+downloads it through the existing authenticated connection, verifies its pinned
+Ed25519 signing key and archive/executable/WASM hashes, and runs its compiled
+Deno executable. The base image supplies system libraries. Runtime downloads do
+not require a GitHub token or local Deno installation.
+
+Each job has a read-only filesystem, no network, an unprivileged user, 1 GiB
+memory with no swap, one CPU and at most 64 processes. Inputs and outputs have
+explicit size limits. The agent renews its server lease every second and kills
+the container if the lease expires, pairing disconnects, or cancellation cannot
+finish within 250 ms. Containers are removed after jobs; reconnecting removes
+orphaned containers belonging to this pairing. Unsupported platforms refuse
+native work while vision capabilities continue independently.
+
+Regeneration returns a verification receipt for the saved document version.
+Exports upload real project files through the server's normal storage path.
+
+Assembly verification uses each saved source version and configuration, even
+when newer versions exist. Missing or inaccessible pinned sources require an
+explicit fix; verification never advances sources automatically or saves derived
+poses into the assembly. Part regeneration and STEP/STL exports remain available.
+
 ## Everyday use
 
 - **Open the desktop app:** run `./dtx-agent`.
@@ -139,7 +173,12 @@ After adding the agent to PATH, you can use `dtx-agent` without the `./` prefix.
 
 ## Configuration
 
-The agent stores its settings in your user configuration folder:
+The agent stores its settings in your user configuration folder. Set
+`DTX_AGENT_CONFIG_DIR` to an absolute directory to use a separate pairing/profile
+without changing the desktop pairing. For clipboard-based pairing, pipe the
+code to `dtx-agent pair --code-stdin` so it does not appear in process arguments.
+
+Default locations:
 
 | Operating system | Default folder |
 | --- | --- |
@@ -189,60 +228,36 @@ HTTP(S) `/v1` servers, disables HTTP proxies and rejects redirects. Existing
 vision model matching and substitution stay unchanged.
 
 The companion advertises `llm.chat` only after listing the selected installed
-model and receiving one valid scripted tool call from it. Initial probing runs
-off the WebSocket read loop; connection loss and agent cancellation abort its
-HTTP request and drain background work. A failed probe leaves chat unavailable.
-The only ingress is the existing outbound bearer-paired
-`/compute/ws` connection. No inbound bridge or local tool/shell execution exists.
-The model emits tool calls for the browser to validate and execute.
+model and receiving one valid scripted tool call from it. That probe runs real
+inference, so it runs once per connection and again only after the selected
+model leaves and returns to the `/models` listing; the 60-second recheck only
+lists models. A failed probe leaves chat unavailable until the next connection.
+With `llm.chat`, the capabilities frame names the model and its context cap:
+
+```json
+{"type":"capabilities","capabilities":["llm.chat"],"chat":{"model":"gemma4:latest","contextTokens":131072}}
+```
+
+The only ingress is the existing outbound bearer-paired `/compute/ws`
+connection. No inbound bridge or local tool/shell execution exists. The model
+emits tool calls for the browser to validate and execute.
 
 The assignment contract is `type: "job.assign"`, a separate
 `jobType: "LLM_CHAT_TOOLS"`, a unique `jobId`, RFC 3339 `expiresAt` in the next
-five minutes, and `payload: { model, messages, tools, maxTokens }`. Unknown fields
-and duplicate JSON members are rejected. Typed member names must match their
-JSON spelling exactly. Arbitrary schema property names remain case-sensitive,
-so `value` and `Value` can coexist. Invalid UTF-8 and unmatched UTF-16 surrogate
-escapes are rejected in all JSON keys and strings before decoding; valid pairs
-and literal escaped backslashes are preserved. Text messages use `system`, `user`,
-`assistant` or `tool` roles; historical tool calls/results must form complete
-pairs. Images use the existing vision path. `responseSchema`, streaming, and
-additional provider options are unsupported in this chat contract.
+five minutes, and `payload: { model, messages, tools, maxTokens }`. `model` must
+equal the advertised model. Unknown fields, duplicate JSON members and invalid
+UTF-8 are rejected. Text messages use `system`, `user`, `assistant` or `tool`
+roles; historical tool calls/results must form complete pairs. Images use the
+existing vision path. `responseSchema`, streaming, and additional provider
+options are unsupported in this chat contract.
 
-Tools use OpenAI function descriptors with `strict: true`. Parameters must be
-object schemas with `additionalProperties: false` on every object. The supported
-schema subset is `type` (one of object, array, string, number, integer, boolean,
-null), `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`,
-`minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `description`
-and `title`. Child schemas also accept exactly one supported non-null base type
-paired with `"null"`, such as `["integer", "null"]`, in either order.
-Present keyword operands cannot be JSON null, except for `const: null`;
-null entries inside an `enum` array remain valid data.
-
-The UI serializer's nullable wrapper is also supported: an object containing only
-`anyOf`, with exactly two branches: one supported single non-null base schema and
-the literal `{ "type": "null" }`, in either order. The non-null branch retains
-all of its constraints. The null branch accepts the optional-field marker even
-when the base branch has an `enum` or `const`. A base branch that is itself a
-union, a non-literal null branch, additional wrapper siblings, or extra branches
-is rejected. Bounds count the wrapper and base separately toward schema depth.
-
-Root tool parameters remain non-nullable objects. Nullable fields still have to
-be present when listed in `required`. In the type-pair form, `enum` and `const`
-continue to constrain null as well as non-null values.
-
-The companion preserves these null fields for the browser's original-domain
-normalization, validation and execution permissions, including in assistant/tool
-history. The valid UI serializer does not need to change. References, arbitrary
-unions, patterns and general combinators remain unsupported and are refused
-before inference. Returned calls must name an advertised tool and satisfy its
-schema.
-
-Numeric bounds and integer checks use exact decimal arithmetic. Numeric literals
-are limited to 128 bytes, 64 mantissa digits (including zeroes), and exponent magnitude 256;
-unsupported precision/range is refused. Equivalent numeric `enum`/`const`
-values such as `0.1` and `0.10` compare equally. String length bounds count
-decoded Unicode code points: an emoji counts once and `e` plus a combining
-accent counts twice. The browser retains its original domain validation.
+Tools use OpenAI function descriptors with `strict: true` and an object
+`parameters` schema, which is passed to the model unchanged. The browser runtime
+owns argument validation. The companion checks only that each tool call names an
+advertised tool and carries a JSON object of at most 8 KiB; arguments of the
+wrong type reach the browser, which returns a recoverable refusal to the model.
+A completion that stops at `maxTokens` (`finish_reason: "length"`) fails with
+`CHAT_TRUNCATED`.
 
 | Limit | Bound |
 | --- | --- |
@@ -250,7 +265,6 @@ accent counts twice. The browser retains its original domain validation.
 | Normalized completion | 60 KiB, leaving room for the result envelope |
 | Messages / tools / calls per assistant message | 64 / 20 / 8 |
 | Message content / tool arguments | 16 KiB / 8 KiB |
-| Tool schema depth / properties per object | 8 / 64 |
 | Installed model listing | 64 KiB / 256 IDs / 200 bytes per ID |
 | Explicit context / output cap | 1 to 1,048,576 / 1 to 8,192 tokens |
 | Probe / inference timeout | 180 seconds each; earlier expiry or cancellation wins |
@@ -271,7 +285,8 @@ jobs when full, rather than evicting unexpired protection. This is process-local
 replay protection; it does not survive agent restart. Backend leases, ownership,
 project scope and durable duplicate-result handling still belong to the backend.
 
-Backend issue #748's chat schema/capability dispatch is a separate dependency.
+The backend `LLM_CHAT_TOOLS` job type and capability dispatch are a separate
+dependency.
 This companion support and its synthetic paired-backend tests do **not** prove
 real platform dispatch or an editor inspect/edit/check/save/reopen workflow.
 Geometry still requires the open editor.

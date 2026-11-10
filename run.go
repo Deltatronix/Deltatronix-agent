@@ -11,10 +11,12 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"reflect"
+	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -52,7 +54,9 @@ func cmdRun(headless bool) error {
 // connectForever runs the connect loop until the process exits — the headless
 // entrypoint.
 func connectForever(cfg Config) {
-	connectLoop(context.Background(), cfg)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	connectLoop(ctx, cfg)
 }
 
 // connectLoop serves and reconnects with jittered backoff, broadcasting status
@@ -132,8 +136,8 @@ type agent struct {
 	conn *websocket.Conn
 	ctx  context.Context
 
-	writeMu        sync.Mutex // serializes conn.Write (one writer at a time)
-	workers        sync.WaitGroup
+	jobsWG         sync.WaitGroup // jobs and the reprobe loop; joined on disconnect
+	writeMu        sync.Mutex     // serializes conn.Write (one writer at a time)
 	settings       LLMSettings
 	probeRequested chan struct{}
 
@@ -143,10 +147,13 @@ type agent struct {
 	configured     bool
 	advertised     bool // whether a capabilities frame has been sent this connection
 	lastCap        bool // last advertised llm.vision state
-	lastChat       bool
-	chatReady      bool
+	chatReady      bool // last advertised llm.chat state; gates chat admission
+	chatProbed     bool // chatReady holds a tool-probe result for the installed model
 	hintShown      bool
 	busy           bool
+	nativeLeases   map[string]nativeLease
+	nativeCap      bool
+	nativeReady    bool
 	jobs           map[string]context.CancelFunc
 }
 
@@ -202,10 +209,13 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	log.Printf("connected")
 	setStatus("Connected")
 
-	a := &agent{cfg: cfg, conn: conn, ctx: ctx, settings: loadLLMSettings(), jobs: map[string]context.CancelFunc{}, probeRequested: make(chan struct{}, 1)}
-	a.workers.Add(1)
-	go func() { defer a.workers.Done(); a.reprobeLoop() }()
-	defer func() { cancel(); a.workers.Wait() }()
+	recoveryErr := reconcileNativeContainers(ctx, cfg.AgentID)
+	if recoveryErr != nil {
+		log.Printf("native recovery unavailable: %v", recoveryErr)
+	}
+	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, settings: loadLLMSettings(), jobs: map[string]context.CancelFunc{}, probeRequested: make(chan struct{}, 1)}
+	defer func() { cancel(); a.jobsWG.Wait() }()
+	a.launchJob(a.reprobeLoop)
 
 	for {
 		_, data, err := conn.Read(ctx)
@@ -237,30 +247,44 @@ func (a *agent) sendLocked(v any) {
 }
 
 func (a *agent) dispatch(data []byte) {
+	// Shape native frames route first, so the chat envelope checks below never
+	// refuse them.
+	var native struct {
+		Type      string          `json:"type"`
+		JobType   string          `json:"jobType"`
+		JobID     string          `json:"jobId"`
+		LeaseID   string          `json:"leaseId"`
+		ExpiresAt int64           `json:"expiresAt"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	_ = json.Unmarshal(data, &native)
+	if native.Type == "job.lease" {
+		a.onNativeLease(native.JobID, native.LeaseID, native.ExpiresAt)
+		return
+	}
+	if native.Type == "SHAPE_NATIVE" || (native.Type == "job.assign" && native.JobType == "SHAPE_NATIVE") {
+		var p nativePayload
+		if err := json.Unmarshal(native.Payload, &p); err != nil {
+			a.rejectMalformedPCBJob(native.JobID, native.Payload)
+			return
+		}
+		a.launchJob(func() { a.runNativeJob(native.JobID, &p) })
+		return
+	}
+
 	var header struct {
 		Type    string          `json:"type"`
 		JobType json.RawMessage `json:"jobType"`
 		JobID   string          `json:"jobId"`
 	}
-	var members map[string]json.RawMessage
-	if json.Unmarshal(data, &members) != nil {
+	if json.Unmarshal(data, &header) != nil {
+		log.Printf("bad compute frame")
 		return
 	}
-	if raw := members["type"]; raw != nil && json.Unmarshal(raw, &header.Type) != nil {
-		return
-	}
-	if raw := members["jobId"]; raw != nil && json.Unmarshal(raw, &header.JobID) != nil {
-		return
-	}
-	header.JobType = members["jobType"]
 	reject := func(message string) {
 		if validChatName(header.JobID, 128) {
 			a.send(resultFrame(header.JobID, nil, message))
 		}
-	}
-	if checkChatMemberNames(data, reflect.TypeOf(header)) != nil {
-		reject("CHAT_INVALID_REQUEST: exact member names required")
-		return
 	}
 	var jobType string
 	if header.JobType != nil {
@@ -287,10 +311,6 @@ func (a *agent) dispatch(data []byte) {
 		return
 	}
 	var f Frame
-	if checkChatMemberNames(data, reflect.TypeFor[Frame]()) != nil {
-		reject("CHAT_INVALID_REQUEST: exact member names required")
-		return
-	}
 	if err := json.Unmarshal(data, &f); err != nil {
 		log.Printf("bad compute frame")
 		return
@@ -348,19 +368,40 @@ func (a *agent) probeAndAdvertise() {
 	}
 	models := a.visionModels
 	revision := a.configRevision
+	hasChat, chatProbed := a.chatReady, a.chatProbed
 	a.mu.Unlock()
 
 	probeCtx, cancel := context.WithTimeout(a.ctx, chatTimeout)
 	defer cancel()
 	installed, probeErr := probeModels(probeCtx)
 	has := probeErr == nil && hasVisionModel(installed, models)
-	hasChat := false
+	// The tool probe runs real inference, so it runs once per connection and
+	// again only after the selected model leaves and returns to /models.
+	// Settings changes restart the agent, which starts a new connection.
+	chatInstalled := false
 	if localChatSettings(a.settings) {
-		chatInstalled, err := probeModelsAt(probeCtx, strings.TrimRight(a.settings.BackendURL, "/"), localChatHTTP)
-		if err == nil {
-			hasChat = probeLocalChat(probeCtx, a.settings, chatInstalled)
+		listed, err := probeModelsAt(probeCtx, strings.TrimRight(a.settings.BackendURL, "/"), localChatHTTP)
+		chatInstalled = err == nil && slices.Contains(listed, a.settings.ChatModel)
+		if chatInstalled && !chatProbed {
+			hasChat = probeLocalChat(probeCtx, a.settings, listed)
 		}
 	}
+	if !chatInstalled {
+		hasChat = false
+	}
+
+	a.mu.Lock()
+	ready := a.nativeReady
+	busy := a.busy // a job may have started since the check above
+	a.mu.Unlock()
+	if !ready && !busy {
+		ready = reconcileNativeContainers(a.ctx, a.cfg.AgentID) == nil
+		a.mu.Lock()
+		a.nativeReady = ready
+		a.mu.Unlock()
+	}
+	nativeAvailable := ready && probeNativeContainer(a.ctx) == nil
+
 	a.mu.Lock()
 	if a.ctx.Err() != nil || a.configRevision != revision {
 		a.mu.Unlock()
@@ -392,25 +433,33 @@ func (a *agent) probeAndAdvertise() {
 		a.mu.Unlock()
 		return
 	}
-	changed := !a.advertised || has != a.lastCap || hasChat != a.lastChat
+	changed := !a.advertised || has != a.lastCap || hasChat != a.chatReady || nativeAvailable != a.nativeCap
 	a.lastCap = has
-	a.lastChat = hasChat
 	a.chatReady = hasChat
+	a.chatProbed = chatInstalled
+	a.nativeCap = nativeAvailable
 	a.advertised = true
 	a.mu.Unlock()
 
 	if !changed {
 		return
 	}
+	frame := map[string]any{"type": "capabilities"}
 	caps := []string{}
 	if has {
 		caps = []string{"llm.vision"}
 	}
 	if hasChat {
 		caps = append(caps, "llm.chat")
+		// A dispatcher needs the exact model and context cap to build a job.
+		frame["chat"] = map[string]any{"model": a.settings.ChatModel, "contextTokens": a.settings.ChatContextTokens}
 	}
+	if nativeAvailable {
+		caps = append(caps, "shape.native.v1", "shape.assembly.v1", "shape.pcb-fit.v1")
+	}
+	frame["capabilities"] = caps
 	log.Printf("advertising capabilities: %v", caps)
-	a.sendLocked(map[string]any{"type": "capabilities", "capabilities": caps})
+	a.sendLocked(frame)
 }
 
 func (a *agent) cancelJob(jobID string) {
@@ -450,8 +499,7 @@ func (a *agent) runJob(jobID string, p *VisionPayload, chatJob *chatAssignment) 
 	jctx, cancel := context.WithCancel(a.ctx)
 	a.jobs[jobID] = cancel
 	a.mu.Unlock()
-	a.workers.Add(1)
-	go func() { defer a.workers.Done(); a.executeJob(jobID, p, chatJob, jctx, cancel) }()
+	a.launchJob(func() { a.executeJob(jobID, p, chatJob, jctx, cancel) })
 }
 
 func (a *agent) executeJob(jobID string, p *VisionPayload, chatJob *chatAssignment, jctx context.Context, cancel context.CancelFunc) {
@@ -554,3 +602,6 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	}
 	return io.ReadAll(resp.Body)
 }
+
+// Register before scheduling so a disconnected reader can safely join every job.
+func (a *agent) launchJob(run func()) { a.jobsWG.Add(1); go func() { defer a.jobsWG.Done(); run() }() }

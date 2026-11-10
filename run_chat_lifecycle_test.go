@@ -199,7 +199,7 @@ func readChatResult(t *testing.T, ctx context.Context, conn *websocket.Conn, id 
 	}
 }
 
-func TestPairedChatRefusesToolArgumentsOutsideAdvertisedSchema(t *testing.T) {
+func TestPairedChatForwardsToolArgumentsOutsideAdvertisedSchema(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 	model := chatModelServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -209,8 +209,8 @@ func TestPairedChatRefusesToolArgumentsOutsideAdvertisedSchema(t *testing.T) {
 	readComputeReply(t, ctx, conn)
 	writeChatFixtureJob(t, ctx, conn, "invalid-tool-args")
 	reply := readChatResult(t, ctx, conn, "invalid-tool-args")
-	if reply.OK || !strings.HasPrefix(reply.Error, "CHAT_INVALID_TOOL_CALL") || len(reply.Result) != 0 {
-		t.Fatalf("tool output outside the advertised schema must not reach the browser as success: ok=%v error=%q", reply.OK, reply.Error)
+	if !reply.OK || len(reply.Result) == 0 {
+		t.Fatalf("the browser validates arguments; the companion must forward them: ok=%v error=%q", reply.OK, reply.Error)
 	}
 }
 
