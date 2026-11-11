@@ -73,7 +73,10 @@ func connectLoop(ctx context.Context, cfg Config) {
 			return
 		}
 		connected, err := serve(ctx, cfg, url)
-		if connected {
+		// An upgrade can precede application authentication or a policy rejection.
+		// Keep retrying transient backend failures, without resetting their backoff.
+		closeStatus := websocket.CloseStatus(err)
+		if connected && closeStatus != websocket.StatusCode(4401) && closeStatus != websocket.StatusPolicyViolation {
 			backoff = backoffMin
 		}
 		if err != nil {

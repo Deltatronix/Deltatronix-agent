@@ -110,6 +110,13 @@ models in its logs. Install a model requested by the agent; with Ollama, use
 
 Keep the model server and agent running while you use local AI features in
 Deltatronix. The agent retries automatically if a connection is interrupted.
+Retries use jittered backoff from one to sixty seconds. Authentication rejection
+(WebSocket 4401) and policy/rate-limit rejection (1008) retain that backoff even if
+the WebSocket upgrade succeeded. Temporary backend failures can also reject
+authentication, so the agent keeps retrying instead of deleting its pairing.
+If the pairing was revoked, get a new code, pair again and restart the headless
+agent; in the desktop app, use Disconnect and then Pair. Each ended connection
+cancels and joins its jobs before the connect loop retries.
 
 ## Local Shape execution
 
