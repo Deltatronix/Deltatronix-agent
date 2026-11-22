@@ -47,34 +47,28 @@ after authentication. Never request or expose secret values. Continue independen
 work while access is blocked. Report genuine access or tooling failures precisely;
 do not turn them into approval requests or claim unperformed verification passed.
 
-## Deploying while Dian is away
+## Deploying backend and realtime
 
-Backend and realtime deploys (`Deltatronix-backend/deploy.sh`,
-`Deltatronix-realtime/deploy.sh`) need Dian to approve the SSH key in a
-1Password popup. He must see that popup within a minute of saying he is at the
-Mac, so do every slow step before you ask him:
+Agents deploy the backend and realtime services themselves, without asking Dian
+and without a 1Password popup (Dian, 2026-11-22). The `deploy` user's SSH key is
+read from `~/.ssh/realtime_deploy_key` on this Mac (`IdentityAgent none` in
+`~/.ssh/config`), not from 1Password.
 
-1. **Stage first.** Merge, put the repo's main checkout on the merged `main`, and
-   run `./deploy.sh --dry-run` there. It runs the whole gate (lint, tests, build)
-   and leaves `release.tar.gz` built for HEAD without contacting a server. Fix
-   failures before asking.
-2. **Ask once:** "Backend `<sha>` is staged; tell me when you're at the Mac for
-   the 1Password popup." While waiting, leave the staged checkout alone (no pull,
-   rebuild or branch switch) and keep working elsewhere.
-3. **When Dian says he is there, your first command is `./deploy.sh --auth`** in
-   each repo you will ship, back to back: no reply, test, build, pull or agent
-   spawn first. It only opens the SSH connection, so the popup shows within
-   seconds. An orchestrator runs it itself; waking or spawning a worker first
-   costs minutes. The popup expires after about 60 seconds; if `--auth` fails
-   with "communication with agent failed", tell Dian and run it again at once.
-4. **Then run `./deploy.sh --ship`.** It skips the gate and ships the staged
-   tarball over the approved connection. That connection stays open for 30
-   minutes, so retries and a second repo need no new popup.
-5. If `--ship` refuses because `main` moved, run `--dry-run` again, then
-   `--ship`. No new popup is needed inside the 30 minutes.
+1. Merge, put the repo's main checkout on the merged `main` (clean tree, equal
+   to `origin/main`), and run `./deploy.sh` there. It runs the whole gate (lint,
+   tests, build), then ships. Fix gate failures; never bypass the gate.
+2. Run one deploy per service at a time. If another agent is deploying the same
+   service, wait for it to finish.
+3. Report the deployed SHA, then verify on the platform (see "Complete the
+   delivery cycle").
 
-`publish.sh` scripts read their token from 1Password as their first step, so
-they prompt at once; run them only after Dian says he is there.
+`--dry-run` still runs the gate without touching a server. `--auth` and `--ship`
+still work but are no longer needed. If a deploy shows a 1Password popup or
+fails with "communication with agent failed", the SSH config was changed back:
+tell Dian, and don't work around it.
+
+`publish.sh` scripts still read their token from 1Password (`op read`) as their
+first step, so they prompt at once; run them only after Dian says he is there.
 
 ## Required models
 

@@ -5,8 +5,8 @@ Before project work, read [AGENTS.md](AGENTS.md) for autonomous delivery authori
 required model assignments, deployment, and platform verification. Apply that
 policy to all approval checkpoints in skills and handoffs used for this project.
 
-Deploying the backend or realtime service needs Dian's 1Password popup: stage with
-`./deploy.sh --dry-run` before asking him, and when he says he is at the Mac run
-`./deploy.sh --auth` first, then `./deploy.sh --ship` (AGENTS.md, "Deploying while
-Dian is away").
+Agents deploy the backend and realtime services themselves, without asking Dian:
+run `./deploy.sh` from the merged, clean `main` checkout. No 1Password popup
+(AGENTS.md, "Deploying backend and realtime"). `publish.sh` still needs Dian
+at the Mac for 1Password.
 
